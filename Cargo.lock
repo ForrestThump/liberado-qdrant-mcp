@@ -488,15 +488,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block-buffer"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
-dependencies = [
- "hybrid-array",
-]
-
-[[package]]
 name = "block-padding"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -691,7 +682,7 @@ version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
- "crypto-common 0.1.7",
+ "crypto-common",
  "inout",
 ]
 
@@ -810,12 +801,6 @@ dependencies = [
  "unicode-width",
  "windows-sys 0.61.2",
 ]
-
-[[package]]
-name = "const-oid"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "cookie"
@@ -972,15 +957,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crypto-common"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
-dependencies = [
- "hybrid-array",
-]
-
-[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1128,19 +1104,8 @@ version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
- "block-buffer 0.10.4",
- "crypto-common 0.1.7",
-]
-
-[[package]]
-name = "digest"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
-dependencies = [
- "block-buffer 0.12.1",
- "const-oid",
- "crypto-common 0.2.2",
+ "block-buffer",
+ "crypto-common",
 ]
 
 [[package]]
@@ -1756,15 +1721,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
-name = "hybrid-array"
-version = "0.4.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "818356c5132c1fede50f837ca96afbe78ff42413047f4abb886217845e1b6c8c"
-dependencies = [
- "typenum",
-]
-
-[[package]]
 name = "hyper"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2304,7 +2260,7 @@ dependencies = [
  "nom 8.0.0",
  "rand 0.10.2",
  "rangemap",
- "sha2 0.10.9",
+ "sha2",
  "stringprep",
  "thiserror 2.0.18",
  "ttf-parser",
@@ -2352,7 +2308,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "toml",
@@ -2452,7 +2408,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
 dependencies = [
  "cfg-if",
- "digest 0.10.7",
+ "digest",
 ]
 
 [[package]]
@@ -3942,7 +3898,7 @@ checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
- "digest 0.10.7",
+ "digest",
 ]
 
 [[package]]
@@ -3953,18 +3909,7 @@ checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
- "digest 0.10.7",
-]
-
-[[package]]
-name = "sha2"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.3.0",
- "digest 0.11.3",
+ "digest",
 ]
 
 [[package]]
@@ -4696,8 +4641,7 @@ dependencies = [
 [[package]]
 name = "turbomcp"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16906591ae2ad2f4e88ab5848030756b62346cb5c1a4ff5eff6820389f98f9b6"
+source = "git+https://github.com/ForrestThump/turbomcp.git?rev=d47a8cabe1647a92046d8d7765ca0b4f2e8819d5#d47a8cabe1647a92046d8d7765ca0b4f2e8819d5"
 dependencies = [
  "axum 0.8.9",
  "schemars",
@@ -4718,8 +4662,7 @@ dependencies = [
 [[package]]
 name = "turbomcp-core"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f02ce2bef778c483364973c7bd41a5187a26c571d66c12a705176c071a9d7209"
+source = "git+https://github.com/ForrestThump/turbomcp.git?rev=d47a8cabe1647a92046d8d7765ca0b4f2e8819d5#d47a8cabe1647a92046d8d7765ca0b4f2e8819d5"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4735,8 +4678,7 @@ dependencies = [
 [[package]]
 name = "turbomcp-http"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57149a45488fa8b2244ff83a19ff7f7d96ccdeb4e9035d1b98a4728ae9fbf96c"
+source = "git+https://github.com/ForrestThump/turbomcp.git?rev=d47a8cabe1647a92046d8d7765ca0b4f2e8819d5#d47a8cabe1647a92046d8d7765ca0b4f2e8819d5"
 dependencies = [
  "bytes",
  "fastrand",
@@ -4754,8 +4696,7 @@ dependencies = [
 [[package]]
 name = "turbomcp-macros"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3d54ebcb5ae8c66b211b19e2403dcaa2b1db7103bd4fb541b52084af3341f5d"
+source = "git+https://github.com/ForrestThump/turbomcp.git?rev=d47a8cabe1647a92046d8d7765ca0b4f2e8819d5#d47a8cabe1647a92046d8d7765ca0b4f2e8819d5"
 dependencies = [
  "axum 0.8.9",
  "proc-macro-crate",
@@ -4771,8 +4712,7 @@ dependencies = [
 [[package]]
 name = "turbomcp-protocol"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23164990da108578193a6f4e190bec74a14b8394c51a5f862893bac2ef73451d"
+source = "git+https://github.com/ForrestThump/turbomcp.git?rev=d47a8cabe1647a92046d8d7765ca0b4f2e8819d5#d47a8cabe1647a92046d8d7765ca0b4f2e8819d5"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -4786,7 +4726,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "pin-project-lite",
- "rand 0.10.2",
+ "rand 0.9.5",
  "regex",
  "serde",
  "serde_json",
@@ -4807,8 +4747,7 @@ dependencies = [
 [[package]]
 name = "turbomcp-server"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7085bc454707740622ea5aa1eeaa8b63f7626d9b2d90ad0577dc5ded20c70105"
+source = "git+https://github.com/ForrestThump/turbomcp.git?rev=d47a8cabe1647a92046d8d7765ca0b4f2e8819d5#d47a8cabe1647a92046d8d7765ca0b4f2e8819d5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4838,8 +4777,7 @@ dependencies = [
 [[package]]
 name = "turbomcp-stdio"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6214c4ca7c37487cdd31de0d126ae372b4d861f736f06fc878387a97db416abd"
+source = "git+https://github.com/ForrestThump/turbomcp.git?rev=d47a8cabe1647a92046d8d7765ca0b4f2e8819d5#d47a8cabe1647a92046d8d7765ca0b4f2e8819d5"
 dependencies = [
  "bytes",
  "futures",
@@ -4856,8 +4794,7 @@ dependencies = [
 [[package]]
 name = "turbomcp-transport"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8744aef789f7f8e7cb64a0d0f1ea8a6de3fc543b8b23c8b3280e2813f5a9212a"
+source = "git+https://github.com/ForrestThump/turbomcp.git?rev=d47a8cabe1647a92046d8d7765ca0b4f2e8819d5#d47a8cabe1647a92046d8d7765ca0b4f2e8819d5"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4869,10 +4806,10 @@ dependencies = [
  "futures",
  "parking_lot",
  "pin-project-lite",
- "rand 0.10.2",
+ "rand 0.9.5",
  "serde",
  "serde_json",
- "sha2 0.11.0",
+ "sha2",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
@@ -4890,8 +4827,7 @@ dependencies = [
 [[package]]
 name = "turbomcp-transport-traits"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a87cca9ba22bc0dadd85ff971ab58179d8fdfb74d23d54b83f278a9e0cdbd17d"
+source = "git+https://github.com/ForrestThump/turbomcp.git?rev=d47a8cabe1647a92046d8d7765ca0b4f2e8819d5#d47a8cabe1647a92046d8d7765ca0b4f2e8819d5"
 dependencies = [
  "bytes",
  "serde",
@@ -4904,8 +4840,7 @@ dependencies = [
 [[package]]
 name = "turbomcp-types"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd9cc4eef445f8743a8eff1872e93c10805f234a93dd1bf63777b19a47db8cf"
+source = "git+https://github.com/ForrestThump/turbomcp.git?rev=d47a8cabe1647a92046d8d7765ca0b4f2e8819d5#d47a8cabe1647a92046d8d7765ca0b4f2e8819d5"
 dependencies = [
  "serde",
  "serde_json",

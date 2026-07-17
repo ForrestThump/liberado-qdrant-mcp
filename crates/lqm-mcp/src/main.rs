@@ -9,10 +9,12 @@ use turbomcp::prelude::*;
 #[derive(Parser)]
 #[command(name = "lqm-mcp", about = "liberado-qdrant-mcp server")]
 struct Cli {
-    #[arg(long)]
+    #[arg(long, env = "LQM_CONFIG")]
     config: Option<String>,
 
-    #[arg(long, default_value = "http://localhost:6334")]
+    /// Qdrant gRPC endpoint. Also settable via QDRANT_URL — in the container the flag would have to
+    /// precede the subcommand, which fights ENTRYPOINT/CMD, so the env var is the practical path.
+    #[arg(long, env = "QDRANT_URL", default_value = "http://localhost:6334")]
     qdrant_url: String,
 
     #[command(subcommand)]
@@ -22,11 +24,50 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Serve {
-        #[arg(long, default_value = "127.0.0.1")]
+        // 0.0.0.0, not 127.0.0.1: this serves inside a container and Liberado reaches it across the
+        // Docker bridge. Bound to loopback it would be unreachable from anywhere but its own netns.
+        #[arg(long, default_value = "0.0.0.0")]
         host: String,
         #[arg(long, default_value_t = 3000)]
         port: u16,
     },
+}
+
+/// Origin policy for the MCP surface.
+///
+/// turbomcp validates the `Origin` header and answers 403 to anything it does not recognise unless
+/// the peer is loopback. That guards against DNS rebinding, where a malicious page in a **browser**
+/// aims XHR at an MCP server bound to localhost.
+///
+/// It cannot do that job here and it breaks the only client we have: Liberado is a server-side HTTP
+/// client reaching this container across a private Docker bridge — not loopback, and it sends no
+/// `Origin` at all, so it is refused every time. Browsers always send `Origin` on cross-origin
+/// requests, so an Origin-less request is definitionally not the attack being defended against.
+///
+/// Default is permissive because this server is consumed by MCP clients on a private network and is
+/// not published to the internet. Set `MCP_ALLOWED_ORIGINS` to a comma-separated list to enforce an
+/// allow-list if it is ever exposed to a browser.
+fn origin_policy() -> ServerConfig {
+    let builder = ServerConfig::builder();
+
+    match std::env::var("MCP_ALLOWED_ORIGINS") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let origins: Vec<String> = raw
+                .split(',')
+                .map(|o| o.trim().to_string())
+                .filter(|o| !o.is_empty())
+                .collect();
+            log::info!("MCP origin validation: allow-listed: {origins:?}");
+            builder.allow_origins(origins).allow_any_origin(false).build()
+        }
+        _ => {
+            log::info!(
+                "MCP origin validation: disabled (private-network default). \
+                 Set MCP_ALLOWED_ORIGINS to enforce an allow-list."
+            );
+            builder.allow_any_origin(true).build()
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -372,7 +413,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             log::info!("lqm-mcp server started");
             let server = LqmServer::new(core).await;
             let addr = format!("{}:{}", host, port);
-            server.run_http(&addr).await?;
+            // Deliberately not `run_http(&addr)`: that convenience wrapper takes no ServerConfig, so
+            // turbomcp's origin validation stays on defaults and 403s every Liberado request. Go
+            // through the builder so origin_policy() actually applies.
+            server
+                .builder()
+                .with_config(origin_policy())
+                .transport(Transport::http(&addr))
+                .serve()
+                .await?;
         }
         None => {
             log::info!("lqm-mcp server started");
