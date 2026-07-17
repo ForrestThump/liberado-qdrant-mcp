@@ -58,7 +58,10 @@ fn origin_policy() -> ServerConfig {
                 .filter(|o| !o.is_empty())
                 .collect();
             log::info!("MCP origin validation: allow-listed: {origins:?}");
-            builder.allow_origins(origins).allow_any_origin(false).build()
+            builder
+                .allow_origins(origins)
+                .allow_any_origin(false)
+                .build()
         }
         _ => {
             log::info!(
