@@ -75,6 +75,28 @@ struct LqmServer {
     core: Arc<RagCore>,
 }
 
+impl LqmServer {
+    /// Create the collection if it is missing, sized to the active embedder.
+    ///
+    /// Deliberately a plain inherent method outside the `#[server]` block: anything in there is a
+    /// candidate for tool export, and this is internal plumbing, not a tool.
+    ///
+    /// The dimension must come from the embedder rather than config — a collection created at the
+    /// wrong width makes every later upsert fail on a dimension mismatch, and Qdrant will not
+    /// silently resize it.
+    async fn ensure_collection(&self, collection: &str) -> McpResult<()> {
+        let dim = self.core.embedder.dimension();
+        self.core
+            .ensure_collection(collection, dim)
+            .await
+            .map_err(|e| {
+                McpError::internal(format!(
+                    "could not ensure collection '{collection}' (dim={dim}): {e}"
+                ))
+            })
+    }
+}
+
 #[server(name = "liberado-qdrant-mcp", version = "0.1.0")]
 impl LqmServer {
     async fn new(core: RagCore) -> Self {
@@ -100,11 +122,19 @@ impl LqmServer {
         last_modified: Option<String>,
     ) -> McpResult<Value> {
         let core = self.core();
+        let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+
+        // Qdrant rejects an upsert into a collection that does not exist, and this server exposes no
+        // create_collection tool — so without this an agent could never ingest anything at all: even
+        // the default collection 404s on a fresh Qdrant, with no in-band way to fix it. Create on
+        // demand at the embedder's dimension, which is also the only place that knows the right size.
+        self.ensure_collection(&collection).await?;
+
         let chunk = DocumentChunk {
             text,
             source,
             source_type,
-            collection: Some(collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string())),
+            collection: Some(collection),
             tags,
             timestamp: None,
             project,
@@ -169,6 +199,9 @@ impl LqmServer {
     async fn ingest_path(&self, path: String, collection: Option<String>) -> McpResult<Value> {
         let core = self.core();
         let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        // Same reason as ingest_text: Qdrant rejects upserts into a missing collection and there is
+        // no create_collection tool to reach for.
+        self.ensure_collection(&collection).await?;
         let metadata = std::fs::metadata(&path)
             .map_err(|e| McpError::internal(format!("cannot access path: {e}")))?;
 
