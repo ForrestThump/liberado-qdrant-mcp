@@ -1,12 +1,15 @@
 # Stage 1: build
 #
-# rust:1.94-bookworm (not -slim, not trixie):
+# rust:1.94-trixie:
 #  - 1.94 because the workspace is edition 2024 and turbomcp declares rust-version 1.89.
 #  - the buildpack-deps base already ships `git`, which the turbomcp git dependency needs.
-#  - -bookworm so the produced binary's glibc matches the bookworm-slim runtime below. The bare
-#    `rust:1.94` / `-slim` tags are trixie-based (glibc 2.38) and the binary then dies on bookworm
-#    with "GLIBC_2.38 not found". Bump both stages together or not at all.
-FROM rust:1.94-bookworm AS builder
+#  - **trixie, NOT bookworm**: fastembed pulls ort, which downloads a prebuilt ONNX Runtime built
+#    against glibc 2.38+. On bookworm (glibc 2.36) the link fails with
+#    "undefined symbol: __isoc23_strtoll / __isoc23_strtoull / __isoc23_strtol".
+#    The runtime stage below is trixie for the same reason — the two must match, since a
+#    trixie-built binary also cannot run on bookworm ("GLIBC_2.38 not found").
+#    Both stages move together or not at all.
+FROM rust:1.94-trixie AS builder
 WORKDIR /build
 
 # fastembed pulls ort (ONNX Runtime), which needs a C++ toolchain and libssl headers to build.
@@ -24,7 +27,10 @@ COPY crates ./crates
 RUN cargo build --release -p lqm-mcp
 
 # Stage 2: runtime
-FROM debian:bookworm-slim
+#
+# trixie-slim to match the builder's glibc (see the builder stage note). ort's prebuilt ONNX Runtime
+# needs glibc 2.38+, so bookworm-slim is not an option here.
+FROM debian:trixie-slim
 
 LABEL org.opencontainers.image.title="liberado-qdrant-mcp"
 LABEL org.opencontainers.image.description="MCP server for RAG over Qdrant with local ONNX embeddings"
