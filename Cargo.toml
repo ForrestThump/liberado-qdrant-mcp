@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lqm-core",
+    "crates/lqm-ingest",
+    "crates/lqm-mcp",
+    "crates/lqm-cli",
+    "crates/lqm-api",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+repository = "https://github.com/ForrestThump/liberado-qdrant-mcp"

@@ -1,0 +1,25 @@
+[package]
+name = "lqm-core"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+embed-fastembed = ["dep:fastembed"]
+embed-ollama = ["dep:reqwest"]
+embed-openai = ["dep:reqwest"]
+
+[dependencies]
+fastembed = { version = "5", optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
+qdrant-client = "1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+num_cpus = "1"
+sha2 = "0.10"
+toml = "0.8"
+log = "0.4"

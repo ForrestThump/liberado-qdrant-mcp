@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>liberado-qdrant-mcp</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; background: #111; color: #ddd; }
+h1 { margin-bottom: 0.5rem; color: #fff; }
+p { margin-bottom: 1rem; color: #888; }
+form { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+input, button { padding: 0.5rem 0.75rem; border: 1px solid #333; border-radius: 6px; background: #1a1a1a; color: #ddd; font-size: 0.95rem; outline: none; }
+input:focus { border-color: #4a9eff; }
+button { background: #2a2a2a; cursor: pointer; font-weight: 500; min-width: 80px; transition: background 0.15s; }
+button:hover { background: #3a3a3a; }
+button:active { background: #444; }
+#query { flex: 1 1 200px; }
+#collection { flex: 0 0 140px; }
+#limit { flex: 0 0 80px; }
+#results { display: flex; flex-direction: column; gap: 0.75rem; }
+.card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; }
+.card .score { font-size: 0.8rem; color: #666; margin-bottom: 0.5rem; }
+.card .score span { color: #4a9eff; font-weight: 600; }
+.card .text { line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
+.card .meta { font-size: 0.75rem; color: #555; margin-top: 0.5rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.card .meta .tag { background: #2a2a2a; padding: 0.1rem 0.4rem; border-radius: 4px; }
+#error { color: #e55; margin-top: 0.5rem; }
+</style>
+</head>
+<body>
+<h1>liberado-qdrant-mcp</h1>
+<p>RAG search &mdash; talk to your documents.</p>
+
+<form id="search-form">
+  <input type="text" id="query" placeholder="Search query..." autofocus>
+  <input type="text" id="collection" placeholder="collection (optional)">
+  <input type="number" id="limit" value="10" min="1" max="100">
+  <button type="submit">Search</button>
+</form>
+
+<div id="error" style="display:none;"></div>
+<div id="results"></div>
+
+<script>
+function escapeHtml(text) {
+  var d = document.createElement('div');
+  d.textContent = text;
+  return d.innerHTML;
+}
+
+document.getElementById('search-form').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  var err = document.getElementById('error');
+  var results = document.getElementById('results');
+  err.style.display = 'none';
+  results.innerHTML = '';
+
+  var query = document.getElementById('query').value.trim();
+  if (!query) {
+    err.textContent = 'Enter a search query.';
+    err.style.display = 'block';
+    return;
+  }
+
+  var collection = document.getElementById('collection').value.trim() || null;
+  var limit = parseInt(document.getElementById('limit').value) || 10;
+  var body = { query: query, limit: limit };
+  if (collection) body.collection = collection;
+
+  try {
+    var resp = await fetch('/api/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    var data = await resp.json();
+    if (!resp.ok) {
+      err.textContent = data.error || 'Search failed.';
+      err.style.display = 'block';
+      return;
+    }
+    if (!data.results || data.results.length === 0) {
+      results.innerHTML = '<div class="card"><p style="color:#666;">No results found.</p></div>';
+      return;
+    }
+    data.results.forEach(function(r) {
+      var score = (r.score * 100).toFixed(1);
+      var card = document.createElement('div');
+      card.className = 'card';
+      var html = '<div class="score">Score: <span>' + score + '%</span></div>';
+      html += '<div class="text">' + escapeHtml(r.text) + '</div>';
+      if (r.payload) {
+        var tags = [];
+        if (r.payload.source) tags.push('<span class="tag">' + escapeHtml(r.payload.source) + '</span>');
+        if (r.payload.source_type) tags.push('<span class="tag">' + escapeHtml(r.payload.source_type) + '</span>');
+        if (r.payload.collection) tags.push('<span class="tag">' + escapeHtml(r.payload.collection) + '</span>');
+        if (tags.length) html += '<div class="meta">' + tags.join('') + '</div>';
+      }
+      card.innerHTML = html;
+      results.appendChild(card);
+    });
+  } catch (err) {
+    var errDiv = document.getElementById('error');
+    errDiv.textContent = 'Network error: ' + err.message;
+    errDiv.style.display = 'block';
+  }
+});
+</script>
+</body>
+</html>
