@@ -21,8 +21,9 @@ src/
 ├── context.rs   — format_relevant_context / _with, mmr_rerank, char budgets
 ├── lifecycle.rs — decide_source_reingest (skip/replace/insert); pure, unit-tested
 ├── memory.rs    — MemoryNote/Hit, DEFAULT_MEMORY_COLLECTION, recency/importance blend ranking
+├── hybrid.rs    — tokenize/keyword_score, RRF + weighted dense+keyword fuse (pure, offline-tested)
 ├── embedding.rs — Embedder trait, FakeEmbedder, FastEmbedder/OllamaEmbedder/OpenAIEmbedder (feature-gated)
-└── qdrant.rs    — QdrantClient wrapper, RagCore orchestrator, search_page, lifecycle I/O, store/recall_memory
+└── qdrant.rs    — QdrantClient wrapper, RagCore orchestrator, search_page (hybrid optional), lifecycle I/O, store/recall_memory
 ```
 
 ## Key design decisions
@@ -38,3 +39,4 @@ src/
 - Embedders are feature-gated (`embed-fastembed`, `embed-ollama`, `embed-openai`)
 - `DEFAULT_COLLECTION_NAME = "default"` — single constant used by all consumers
 - Memories default to collection `memories` with `source_type=memory` and `source=memory://{id}`; store reuses skip/replace; recall post-processes with optional recency blend (generation stays host-side)
+- Hybrid search (`SearchOptions.hybrid`) fuses dense hits with keyword overlap on payload text (+ bounded scroll candidates); dense-only remains default

@@ -179,3 +179,22 @@ plus optional importance/recency re-rank; no server-side LLM generation.
 touch-on-recall writes, or hybrid sparse+dense over memories only.
 
 ---
+## 012 — Hybrid search via post-query dense+keyword fusion (not native sparse)
+
+**Date:** 2026-07-18
+
+**What:** Hybrid retrieval is an optional flag on `search_page` / MCP `search` /
+HTTP `/api/search`. It over-fetches dense hits, optionally merges keyword-
+matching scroll candidates, and fuses scores with weighted normalized dense+
+keyword signals plus reciprocal rank fusion (RRF). No Qdrant sparse vector
+schema or second index.
+
+**Why:**
+- Ships keyword rescue for rare tokens without collection migrations.
+- Fusion helpers are pure and unit-tested offline (CI without Qdrant).
+- Dense-only default keeps existing agents/tests stable.
+
+**Revisit if:** collections grow large enough that scroll candidate scans hurt
+latency, or agents need true sparse BM25 indexes in Qdrant.
+
+---

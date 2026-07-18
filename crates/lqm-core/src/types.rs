@@ -170,6 +170,12 @@ pub struct SearchOptions {
     pub offset: Option<u64>,
     pub min_score: Option<f32>,
     pub filter: SearchFilter,
+    /// When true, fuse dense scores with keyword overlap on payload text (hybrid retrieval).
+    /// Dense-only remains the default (`false` / unset).
+    pub hybrid: bool,
+    /// Dense weight in hybrid fusion ∈ [0, 1]; keyword weight is `1 - alpha`.
+    /// Default [`crate::hybrid::DEFAULT_HYBRID_ALPHA`] when hybrid is on and this is `None`.
+    pub hybrid_alpha: Option<f32>,
 }
 
 /// One page of search hits with pagination metadata.

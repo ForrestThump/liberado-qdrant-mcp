@@ -9,6 +9,7 @@ pub mod config;
 pub mod context;
 pub mod embedding;
 pub mod error;
+pub mod hybrid;
 pub mod lifecycle;
 pub mod memory;
 pub mod qdrant;
@@ -18,6 +19,10 @@ pub use api_error::{StructuredError, error_code, http_status, structured_error};
 pub use context::{
     ContextSource, FormattedContext, format_relevant_context, format_relevant_context_with,
     mmr_rerank,
+};
+pub use hybrid::{
+    DEFAULT_HYBRID_ALPHA, DEFAULT_RRF_K, fuse_dense_keyword, hybrid_dense_fetch_limit,
+    keyword_score, merge_and_fuse_hybrid, tokenize_for_keyword,
 };
 pub use lifecycle::decide_source_reingest;
 pub use memory::{

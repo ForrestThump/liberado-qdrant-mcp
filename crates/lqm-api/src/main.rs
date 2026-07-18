@@ -57,6 +57,9 @@ struct SearchBody {
     source_type: Option<String>,
     project: Option<String>,
     min_score: Option<f32>,
+    /// Dense + keyword fusion when true (default false = dense-only).
+    hybrid: Option<bool>,
+    hybrid_alpha: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +79,8 @@ struct ContextBody {
     max_total_chars: Option<u64>,
     mmr: Option<bool>,
     mmr_lambda: Option<f32>,
+    hybrid: Option<bool>,
+    hybrid_alpha: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -242,6 +247,7 @@ async fn search(
     State(state): State<AppState>,
     Json(body): Json<SearchBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let hybrid_on = body.hybrid.unwrap_or(false);
     let page = state
         .core
         .search_page(
@@ -259,6 +265,8 @@ async fn search(
                     tags_should: body.tags_should,
                     tags_must_not: body.tags_must_not,
                 },
+                hybrid: hybrid_on,
+                hybrid_alpha: body.hybrid_alpha,
             },
         )
         .await
@@ -270,6 +278,7 @@ async fn search(
         "limit": page.limit,
         "has_more": page.has_more,
         "next_offset": page.next_offset,
+        "hybrid": hybrid_on,
     })))
 }
 
@@ -298,6 +307,8 @@ async fn get_relevant_context(
                     tags_should: body.tags_should,
                     tags_must_not: body.tags_must_not,
                 },
+                hybrid: body.hybrid.unwrap_or(false),
+                hybrid_alpha: body.hybrid_alpha,
             },
         )
         .await

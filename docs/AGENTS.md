@@ -8,6 +8,7 @@ Headless RAG for LLM agents: **Qdrant + embeddings + MCP/HTTP**. No chat UI.
 |------|--------|--------|
 | Paste LLM-ready passages with citations | `get_relevant_context` | Raw `search` (unless you post-process yourself) |
 | Inspect scores / build custom prompts | `search` | — |
+| Rare exact tokens dense may bury | `search` with `hybrid=true` (optional `hybrid_alpha`, lower = more keyword) | Expecting pure dense to match nonsense tokens |
 | Add knowledge from text | `ingest_text` | — |
 | Add a file or vault tree | `ingest_path` | — |
 | Add a webpage | `ingest_url` | — |
@@ -20,6 +21,8 @@ Headless RAG for LLM agents: **Qdrant + embeddings + MCP/HTTP**. No chat UI.
 | Retrieve past prefs/facts by meaning | `recall_memories` (optional `use_recency`) | Full-collection `search` without memory filter |
 
 **Search vs context:** `search` returns JSON hits (`text`, `score`, `payload`) plus pagination (`offset`, `has_more`, `next_offset`). `get_relevant_context` reuses the same filters/pagination, optionally applies MMR and a char budget, and returns markdown with numbered passages and a `sources` array.
+
+**Hybrid retrieval:** set `hybrid=true` on `search` / `get_relevant_context` (or JSON body for HTTP). Core over-fetches dense hits, merges keyword-matching scroll candidates, and fuses with weighted dense + keyword scores and RRF. Response includes `"hybrid": true`. Default remains dense-only when `hybrid` is omitted/false.
 
 ## MCP tool matrix ↔ HTTP
 

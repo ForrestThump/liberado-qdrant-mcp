@@ -851,6 +851,8 @@ impl RagCore {
                         tags_should: None,
                         tags_must_not: None,
                     },
+                    hybrid: false,
+                    hybrid_alpha: None,
                 },
             )
             .await?;
@@ -858,6 +860,10 @@ impl RagCore {
     }
 
     /// Filtered semantic search with offset pagination (`has_more` / `next_offset`).
+    ///
+    /// When `opts.hybrid` is true, over-fetches dense hits, optionally merges
+    /// keyword-matching scroll candidates, and fuses with
+    /// [`crate::hybrid::merge_and_fuse_hybrid`]. Dense-only when hybrid is false.
     pub async fn search_page(
         &self,
         query: &str,
@@ -882,11 +888,12 @@ impl RagCore {
         }
 
         log::debug!(
-            "searching '{}' in '{}' (limit:{} offset:{})",
+            "searching '{}' in '{}' (limit:{} offset:{} hybrid:{})",
             query,
             collection,
             limit,
-            offset
+            offset,
+            opts.hybrid
         );
 
         let query_embedding = self.embed_batch(vec![query.to_string()]).await?;
@@ -897,24 +904,111 @@ impl RagCore {
 
         let filter = search_filter_to_qdrant(&opts.filter);
 
-        // Fetch one extra hit to detect has_more without a separate count call.
-        let fetch_limit = limit.saturating_add(1);
-        let mut results = self
+        if !opts.hybrid {
+            // Fetch one extra hit to detect has_more without a separate count call.
+            let fetch_limit = limit.saturating_add(1);
+            let mut results = self
+                .qdrant
+                .search(
+                    collection,
+                    query_vector,
+                    fetch_limit,
+                    filter,
+                    opts.min_score,
+                    Some(offset),
+                )
+                .await?;
+
+            let has_more = results.len() as u64 > limit;
+            if has_more {
+                results.truncate(limit as usize);
+            }
+            let next_offset = if has_more {
+                Some(offset.saturating_add(limit))
+            } else {
+                None
+            };
+
+            return Ok(SearchPage {
+                results,
+                offset,
+                limit,
+                has_more,
+                next_offset,
+            });
+        }
+
+        // Hybrid path: over-fetch dense, merge keyword scroll candidates, fuse.
+        let alpha = opts
+            .hybrid_alpha
+            .unwrap_or(crate::hybrid::DEFAULT_HYBRID_ALPHA);
+        let dense_fetch = crate::hybrid::hybrid_dense_fetch_limit(limit);
+        // Fetch dense from offset 0 for a stable fusion pool when hybrid; apply
+        // pagination after fusion. (Dense-only keeps native Qdrant offset.)
+        let dense_pool = self
             .qdrant
             .search(
                 collection,
                 query_vector,
-                fetch_limit,
-                filter,
-                opts.min_score,
-                Some(offset),
+                dense_fetch,
+                filter.clone(),
+                None, // min_score applied after fusion if set
+                Some(0),
             )
             .await?;
 
-        let has_more = results.len() as u64 > limit;
-        if has_more {
-            results.truncate(limit as usize);
+        let tokens = crate::hybrid::tokenize_for_keyword(query);
+        let mut keyword_candidates: Vec<SearchResult> = Vec::new();
+        if !tokens.is_empty() {
+            // Bounded scroll for rare-token hits dense may bury or miss.
+            const KEYWORD_SCROLL_PAGE: u32 = 128;
+            if let Ok(payloads) = self
+                .qdrant
+                .scroll_payloads(collection, filter, KEYWORD_SCROLL_PAGE)
+                .await
+            {
+                for payload in payloads {
+                    let text = payload
+                        .get(payload_schema::TEXT)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let kw = crate::hybrid::keyword_score(&text, &tokens);
+                    if kw > 0.0 {
+                        keyword_candidates.push(SearchResult {
+                            text,
+                            score: 0.0,
+                            payload,
+                        });
+                    }
+                }
+            }
         }
+
+        let mut fused = crate::hybrid::merge_and_fuse_hybrid(
+            &dense_pool,
+            &keyword_candidates,
+            query,
+            alpha,
+            crate::hybrid::DEFAULT_RRF_K,
+        );
+
+        if let Some(min) = opts.min_score {
+            fused.retain(|r| r.score >= min);
+        }
+
+        let total = fused.len() as u64;
+        let start = offset.min(total) as usize;
+        let end = (offset.saturating_add(limit)).min(total) as usize;
+        let page_results = if start < fused.len() {
+            fused[start..end].to_vec()
+        } else {
+            Vec::new()
+        };
+        let has_more = end < fused.len();
         let next_offset = if has_more {
             Some(offset.saturating_add(limit))
         } else {
@@ -922,7 +1016,7 @@ impl RagCore {
         };
 
         Ok(SearchPage {
-            results,
+            results: page_results,
             offset,
             limit,
             has_more,
@@ -1055,6 +1149,8 @@ impl RagCore {
                         tags_should: None,
                         tags_must_not: None,
                     },
+                    hybrid: false,
+                    hybrid_alpha: None,
                 },
             )
             .await?;

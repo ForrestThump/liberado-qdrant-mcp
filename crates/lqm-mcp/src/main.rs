@@ -225,6 +225,9 @@ impl LqmServer {
     }
 
     /// Semantic search with filters and offset pagination.
+    ///
+    /// Set `hybrid=true` to fuse dense similarity with keyword overlap on chunk
+    /// text (helps rare tokens dense-only can miss). Dense-only is the default.
     #[tool]
     #[allow(clippy::too_many_arguments)]
     async fn search(
@@ -240,7 +243,10 @@ impl LqmServer {
         source_type: Option<String>,
         project: Option<String>,
         min_score: Option<f32>,
+        hybrid: Option<bool>,
+        hybrid_alpha: Option<f32>,
     ) -> McpResult<Value> {
+        let hybrid_on = hybrid.unwrap_or(false);
         let page = self
             .core()
             .search_page(
@@ -258,6 +264,8 @@ impl LqmServer {
                         tags_should,
                         tags_must_not,
                     },
+                    hybrid: hybrid_on,
+                    hybrid_alpha,
                 },
             )
             .await
@@ -280,6 +288,7 @@ impl LqmServer {
             "limit": page.limit,
             "has_more": page.has_more,
             "next_offset": page.next_offset,
+            "hybrid": hybrid_on,
         }))
     }
 
@@ -306,6 +315,8 @@ impl LqmServer {
         max_total_chars: Option<u64>,
         mmr: Option<bool>,
         mmr_lambda: Option<f32>,
+        hybrid: Option<bool>,
+        hybrid_alpha: Option<f32>,
     ) -> McpResult<Value> {
         let coll = collection
             .clone()
@@ -327,6 +338,8 @@ impl LqmServer {
                         tags_should,
                         tags_must_not,
                     },
+                    hybrid: hybrid.unwrap_or(false),
+                    hybrid_alpha,
                 },
             )
             .await
@@ -1183,6 +1196,8 @@ async fn test_all_mcp_tools_live_smoke() {
             None, // source_type
             None, // project
             None, // min_score
+            None, // hybrid
+            None, // hybrid_alpha
         )
         .await
         .expect("search");
@@ -1200,6 +1215,7 @@ async fn test_all_mcp_tools_live_smoke() {
         "missing has_more: {search}"
     );
     assert!(search.get("offset").is_some(), "missing offset: {search}");
+    assert_eq!(search["hybrid"], false);
 
     // 7b) filtered search by source
     let filtered = server
@@ -1212,6 +1228,8 @@ async fn test_all_mcp_tools_live_smoke() {
             None,
             None,
             Some("smoke://text".to_string()),
+            None,
+            None,
             None,
             None,
             None,
@@ -1240,6 +1258,8 @@ async fn test_all_mcp_tools_live_smoke() {
             Some(200),   // max_chars_per_passage
             Some(4000),  // max_total_chars
             Some(false), // mmr
+            None,
+            None, // hybrid
             None,
         )
         .await
@@ -1358,6 +1378,84 @@ async fn test_p4_memory_live_smoke() {
     );
     assert!(mems[0].get("blended_score").is_some());
     assert!(mems[0].get("importance").is_some());
+
+    let _ = server.delete_collection(coll.to_string()).await;
+}
+
+/// P5 hybrid search: rare keyword doc surfaces under hybrid=true (skips if no Qdrant).
+#[tokio::test]
+async fn test_p5_hybrid_live_smoke() {
+    let Some(server) = live_test_server().await else {
+        return;
+    };
+    let coll = "lqm_smoke_hybrid_p5";
+    let _ = server.delete_collection(coll.to_string()).await;
+    server
+        .create_collection(coll.to_string(), None)
+        .await
+        .expect("create_collection");
+
+    // Doc without the rare token.
+    let _ = server
+        .ingest_text(
+            "Fluffy clouds drift over the quiet mountain lake at dawn.".to_string(),
+            Some("smoke://hybrid-generic".to_string()),
+            Some("text".to_string()),
+            Some(coll.to_string()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("ingest generic");
+
+    // Doc with distinctive rare keyword that pure dense may bury.
+    let rare = "rarekeytokenxqzv9f3a";
+    let _ = server
+        .ingest_text(
+            format!("Agent notes about Liberado retrieval and the token {rare} for hybrid smoke."),
+            Some("smoke://hybrid-keyword".to_string()),
+            Some("text".to_string()),
+            Some(coll.to_string()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("ingest keyword doc");
+
+    let hybrid = server
+        .search(
+            rare.to_string(),
+            Some(coll.to_string()),
+            Some(5),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(true), // hybrid
+            Some(0.35), // lean keyword for rare-token queries
+        )
+        .await
+        .expect("hybrid search");
+    assert_eq!(hybrid["hybrid"], true, "{hybrid}");
+    let results = hybrid["results"].as_array().expect("results");
+    assert!(!results.is_empty(), "hybrid expected hits: {hybrid}");
+    let joined: String = results
+        .iter()
+        .filter_map(|r| r["text"].as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(
+        joined.contains(rare),
+        "hybrid results must include rare keyword doc; got: {joined}"
+    );
+    assert!(results[0].get("score").is_some());
+    assert!(results[0].get("payload").is_some() || results[0].get("text").is_some());
 
     let _ = server.delete_collection(coll.to_string()).await;
 }

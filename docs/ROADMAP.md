@@ -78,7 +78,7 @@ Within a band, list order is the suggested implementation sequence.
 | **P2** | Ingest quality & reporting | Fewer bad chunks; agents can act on per-file errors | **Shipped** |
 | **P3** | MCP ↔ API parity + agent ergonomics | Remaining parity (path/url ingest API, docs, errors) | **Shipped** |
 | **P4** | Memories | Agent long-term notes; valuable but after curation/retrieval | **Shipped** |
-| **P5** | Nice-to-haves | Lower payoff or out of core headless path | Next |
+| **P5** | Nice-to-haves | Lower payoff or out of core headless path | **Hybrid shipped**; rest backlog |
 
 ---
 
@@ -181,15 +181,28 @@ Within a band, list order is the suggested implementation sequence.
 
 ---
 
-## P5 — Backlog (lower leverage or non-core)
+## P5 — Hybrid retrieval (partial; headless slice shipped)
 
-- Hybrid / sparse + dense search (if keyword misses hurt after P1)
+*Highest-leverage P5 item first: dense + keyword fusion without a second DB.*
+
+### Shipped
+
+- [x] Hybrid search mode on `SearchOptions` / `RagCore::search_page` (`hybrid`, `hybrid_alpha`)
+- [x] Pure fusion helpers in `lqm_core::hybrid` (tokenize, keyword_score, weighted + RRF fuse, merge candidates)
+- [x] MCP `search` / `get_relevant_context` and HTTP `POST /api/search` + `/api/context` accept `hybrid` / `hybrid_alpha` (dense-only default)
+- [x] Unit tests for fusion ranking; live smoke `test_p5_hybrid_live_smoke` (skip if no Qdrant)
+
+**Done when (met for hybrid):** agents can request hybrid retrieval so rare keywords still surface among hits. ✅
+
+### Still backlog (not shipped)
+
 - Audio transcription (whisper-rs) — replace audio placeholder
 - Clearance-safe / scoped filtering beyond simple payload tags
 - Dioxus richer SPA (MCP + API remain priority over UI)
 - WASM build of core for browser-side use
 - Chat-with-context tool (only if a host cannot generate itself)
 - Background re-index workers / heavy queues
+- Native Qdrant sparse vectors (optional upgrade; current hybrid is post-query fusion over dense + text)
 
 ---
 
