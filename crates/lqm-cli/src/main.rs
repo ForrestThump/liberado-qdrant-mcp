@@ -145,7 +145,10 @@ async fn ingest_single_file(
     };
 
     match core.embed_and_upsert_batch(vec![chunk]).await {
-        Ok(count) => println!("ingested {source}: chunks={count}"),
+        Ok(report) => println!(
+            "ingested {source}: chunks={} inserted={} skipped={} replaced={}",
+            report.chunks, report.inserted, report.skipped, report.replaced
+        ),
         Err(e) => log::error!("ingest error {source}: {e}"),
     }
 }

@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use lqm_core::RagCore;
 use lqm_core::config::{EmbedderConfig, create_embedder};
 use lqm_core::format_relevant_context;
-use lqm_core::types::{DEFAULT_COLLECTION_NAME, DocumentChunk, RagConfig};
+use lqm_core::types::{DEFAULT_COLLECTION_NAME, DocumentChunk, PayloadFilter, RagConfig};
 use serde_json::Value;
 use std::sync::Arc;
 use turbomcp::prelude::*;
@@ -138,14 +138,21 @@ impl LqmServer {
             text,
             source,
             source_type,
-            collection: Some(collection),
+            collection: Some(collection.clone()),
             tags,
             timestamp: None,
             project,
             last_modified,
         };
         match core.embed_and_upsert_batch(vec![chunk]).await {
-            Ok(count) => Ok(serde_json::json!({"status": "ok", "chunks": count})),
+            Ok(report) => Ok(serde_json::json!({
+                "status": "ok",
+                "collection": collection,
+                "inserted": report.inserted,
+                "skipped": report.skipped,
+                "replaced": report.replaced,
+                "chunks": report.chunks,
+            })),
             Err(e) => Err(McpError::internal(format!("ingest failed: {e}"))),
         }
     }
@@ -349,17 +356,20 @@ impl LqmServer {
             )));
         }
 
-        let count = self
+        let report = self
             .core()
             .embed_and_upsert_batch(chunks)
             .await
             .map_err(|e| McpError::internal(format!("ingest_url upsert failed: {e}")))?;
 
         log::info!(
-            "ingested url {} ({} chunks) into '{}'",
+            "ingested url {} ({} chunks) into '{}' (inserted={} skipped={} replaced={})",
             url,
-            count,
-            collection
+            report.chunks,
+            collection,
+            report.inserted,
+            report.skipped,
+            report.replaced
         );
         Ok(serde_json::json!({
             "status": "ok",
@@ -367,8 +377,11 @@ impl LqmServer {
             "source": resolved_source,
             "source_type": resolved_source_type,
             "content_type": fetched.content_type,
-            "chunks": count,
             "collection": collection,
+            "inserted": report.inserted,
+            "skipped": report.skipped,
+            "replaced": report.replaced,
+            "chunks": report.chunks,
         }))
     }
 
@@ -428,26 +441,100 @@ impl LqmServer {
         }
 
         if chunks.is_empty() {
-            return Ok(serde_json::json!({"status": "no files ingested", "files": 0, "chunks": 0}));
+            return Ok(serde_json::json!({
+                "status": "no files ingested",
+                "files": 0,
+                "inserted": 0,
+                "skipped": 0,
+                "replaced": 0,
+                "chunks": 0,
+            }));
         }
 
-        let result = core
+        let report = core
             .embed_and_upsert_batch(chunks)
             .await
             .map_err(|e| McpError::internal(format!("upsert failed: {e}")))?;
 
         log::info!(
-            "ingested {} files ({} chunks) into '{}'",
+            "ingested {} files ({} chunks) into '{}' (inserted={} skipped={} replaced={})",
             file_count,
-            result,
-            collection
+            report.chunks,
+            collection,
+            report.inserted,
+            report.skipped,
+            report.replaced
         );
         Ok(serde_json::json!({
             "status": "ok",
             "files": file_count,
-            "chunks": result,
             "collection": collection,
+            "inserted": report.inserted,
+            "skipped": report.skipped,
+            "replaced": report.replaced,
+            "chunks": report.chunks,
         }))
+    }
+
+    /// List distinct document sources in a collection (for agent curation).
+    #[tool]
+    async fn list_sources(&self, collection: Option<String>) -> McpResult<Value> {
+        let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        match self.core().list_sources(&collection).await {
+            Ok(sources) => Ok(serde_json::json!({
+                "status": "ok",
+                "collection": collection,
+                "sources": sources,
+            })),
+            Err(e) => Err(McpError::internal(format!("list_sources failed: {e}"))),
+        }
+    }
+
+    /// Delete all points for a given source within a collection.
+    #[tool]
+    async fn delete_by_source(
+        &self,
+        source: String,
+        collection: Option<String>,
+    ) -> McpResult<Value> {
+        let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        match self.core().delete_by_source(&collection, &source).await {
+            Ok(deleted) => Ok(serde_json::json!({
+                "status": "ok",
+                "collection": collection,
+                "source": source,
+                "deleted": deleted,
+            })),
+            Err(e) => Err(McpError::internal(format!("delete_by_source failed: {e}"))),
+        }
+    }
+
+    /// Delete points matching payload filters (AND of provided fields).
+    #[tool]
+    async fn delete_by_filter(
+        &self,
+        collection: Option<String>,
+        source: Option<String>,
+        source_type: Option<String>,
+        project: Option<String>,
+        tags: Option<Vec<String>>,
+    ) -> McpResult<Value> {
+        let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        let filter = PayloadFilter {
+            source,
+            source_type,
+            project,
+            tags,
+        };
+        match self.core().delete_by_filter(&collection, &filter).await {
+            Ok(deleted) => Ok(serde_json::json!({
+                "status": "ok",
+                "collection": collection,
+                "deleted": deleted,
+                "filter": filter,
+            })),
+            Err(e) => Err(McpError::internal(format!("delete_by_filter failed: {e}"))),
+        }
     }
 }
 
@@ -574,9 +661,11 @@ async fn test_all_mcp_tools_live_smoke() {
     );
 
     // 4) ingest_text
+    let text_body =
+        "Unique smoke sentence about orange kites and vector retrieval for agents.".to_string();
     let ingested = server
         .ingest_text(
-            "Unique smoke sentence about orange kites and vector retrieval for agents.".to_string(),
+            text_body.clone(),
             Some("smoke://text".to_string()),
             Some("text".to_string()),
             Some(coll.clone()),
@@ -590,6 +679,65 @@ async fn test_all_mcp_tools_live_smoke() {
     assert!(
         ingested["chunks"].as_u64().unwrap_or(0) >= 1,
         "ingest_text chunks: {ingested}"
+    );
+    assert_eq!(ingested["inserted"].as_u64().unwrap_or(0), 1);
+
+    // 4b) re-ingest same content → skip
+    let skipped = server
+        .ingest_text(
+            text_body.clone(),
+            Some("smoke://text".to_string()),
+            Some("text".to_string()),
+            Some(coll.clone()),
+            Some(vec!["smoke".to_string()]),
+            Some("lqm_smoke".to_string()),
+            None,
+        )
+        .await
+        .expect("ingest_text skip");
+    assert_eq!(
+        skipped["skipped"].as_u64().unwrap_or(0),
+        1,
+        "skip: {skipped}"
+    );
+    assert_eq!(
+        skipped["chunks"].as_u64().unwrap_or(0),
+        0,
+        "skip chunks: {skipped}"
+    );
+
+    // 4c) re-ingest changed content → replace
+    let replaced = server
+        .ingest_text(
+            "Updated smoke sentence about orange kites (v2).".to_string(),
+            Some("smoke://text".to_string()),
+            Some("text".to_string()),
+            Some(coll.clone()),
+            Some(vec!["smoke".to_string()]),
+            Some("lqm_smoke".to_string()),
+            None,
+        )
+        .await
+        .expect("ingest_text replace");
+    assert_eq!(
+        replaced["replaced"].as_u64().unwrap_or(0),
+        1,
+        "replace: {replaced}"
+    );
+    assert!(replaced["chunks"].as_u64().unwrap_or(0) >= 1);
+
+    // 4d) list_sources
+    let sources = server
+        .list_sources(Some(coll.clone()))
+        .await
+        .expect("list_sources");
+    assert_eq!(sources["status"], "ok");
+    let src_arr = sources["sources"].as_array().expect("sources array");
+    assert!(
+        src_arr
+            .iter()
+            .any(|s| s["source"].as_str() == Some("smoke://text")),
+        "list_sources missing smoke://text: {sources}"
     );
 
     // 5) ingest_path — real temp file
@@ -686,7 +834,43 @@ async fn test_all_mcp_tools_live_smoke() {
         "passage_count: {ctx}"
     );
 
-    // 9) delete_collection cleanup
+    // 9) delete_by_source — curation without wiping the collection
+    let del_src = server
+        .delete_by_source("smoke://text".to_string(), Some(coll.clone()))
+        .await
+        .expect("delete_by_source");
+    assert!(
+        del_src["deleted"].as_u64().unwrap_or(0) >= 1,
+        "delete_by_source: {del_src}"
+    );
+    let sources_after = server
+        .list_sources(Some(coll.clone()))
+        .await
+        .expect("list_sources after delete");
+    let remaining = sources_after["sources"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !remaining
+            .iter()
+            .any(|s| s["source"].as_str() == Some("smoke://text")),
+        "source should be gone: {sources_after}"
+    );
+
+    // 10) delete_by_filter on tags (path ingest used no tags on file source; filter by source_type text from path may remain)
+    let _ = server
+        .delete_by_filter(
+            Some(coll.clone()),
+            None,
+            Some("text".to_string()),
+            None,
+            None,
+        )
+        .await
+        .expect("delete_by_filter");
+
+    // 11) delete_collection cleanup
     let deleted = server
         .delete_collection(coll.clone())
         .await
@@ -697,6 +881,105 @@ async fn test_all_mcp_tools_live_smoke() {
         .await
         .expect("get after delete");
     assert_eq!(gone["exists"], false, "collection should be gone: {gone}");
+}
+
+/// P0 lifecycle hard-require smoke: list_sources, skip/replace, delete_by_source.
+#[tokio::test]
+async fn test_p0_lifecycle_live_smoke() {
+    let server = require_test_server().await;
+    let coll = "lqm_smoke_p0_lifecycle";
+    let _ = server.delete_collection(coll.to_string()).await;
+    server
+        .create_collection(coll.to_string(), None)
+        .await
+        .expect("create");
+
+    let src = "p0://doc-a";
+    let v1 = "P0 lifecycle document version one about curated sources.";
+    let first = server
+        .ingest_text(
+            v1.to_string(),
+            Some(src.to_string()),
+            Some("text".to_string()),
+            Some(coll.to_string()),
+            Some(vec!["p0".to_string()]),
+            Some("proj-p0".to_string()),
+            None,
+        )
+        .await
+        .expect("ingest v1");
+    assert_eq!(first["inserted"], 1);
+    assert_eq!(first["chunks"], 1);
+
+    let listed = server
+        .list_sources(Some(coll.to_string()))
+        .await
+        .expect("list");
+    assert!(
+        listed["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["source"] == src && s["count"] == 1),
+        "{listed}"
+    );
+
+    let skip = server
+        .ingest_text(
+            v1.to_string(),
+            Some(src.to_string()),
+            Some("text".to_string()),
+            Some(coll.to_string()),
+            Some(vec!["p0".to_string()]),
+            Some("proj-p0".to_string()),
+            None,
+        )
+        .await
+        .expect("skip");
+    assert_eq!(skip["skipped"], 1, "{skip}");
+    assert_eq!(skip["chunks"], 0, "{skip}");
+
+    let v2 = "P0 lifecycle document version two — replaced content.";
+    let rep = server
+        .ingest_text(
+            v2.to_string(),
+            Some(src.to_string()),
+            Some("text".to_string()),
+            Some(coll.to_string()),
+            Some(vec!["p0".to_string()]),
+            Some("proj-p0".to_string()),
+            None,
+        )
+        .await
+        .expect("replace");
+    assert_eq!(rep["replaced"], 1, "{rep}");
+    assert_eq!(rep["chunks"], 1, "{rep}");
+
+    let del = server
+        .delete_by_source(src.to_string(), Some(coll.to_string()))
+        .await
+        .expect("delete_by_source");
+    assert!(del["deleted"].as_u64().unwrap_or(0) >= 1, "{del}");
+
+    let empty = server
+        .list_sources(Some(coll.to_string()))
+        .await
+        .expect("list empty");
+    assert!(
+        empty["sources"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false),
+        "{empty}"
+    );
+
+    // delete_by_filter validation
+    let bad = server
+        .delete_by_filter(Some(coll.to_string()), None, None, None, None)
+        .await;
+    assert!(bad.is_err(), "empty filter should fail");
+
+    let _ = server.delete_collection(coll.to_string()).await;
 }
 
 #[tokio::test]

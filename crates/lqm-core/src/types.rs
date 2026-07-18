@@ -33,6 +33,64 @@ pub struct CollectionInfoSummary {
     pub distance: Option<String>,
 }
 
+/// Distinct document source within a collection (agent curation).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceSummary {
+    pub source: String,
+    pub count: u64,
+    pub source_type: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+/// Payload filters for delete/list operations (AND of provided fields).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PayloadFilter {
+    pub source: Option<String>,
+    pub source_type: Option<String>,
+    pub project: Option<String>,
+    pub tags: Option<Vec<String>>,
+}
+
+impl PayloadFilter {
+    pub fn is_empty(&self) -> bool {
+        self.source.is_none()
+            && self.source_type.is_none()
+            && self.project.is_none()
+            && self.tags.as_ref().map(|t| t.is_empty()).unwrap_or(true)
+    }
+
+    pub fn for_source(source: impl Into<String>) -> Self {
+        Self {
+            source: Some(source.into()),
+            ..Default::default()
+        }
+    }
+}
+
+/// Outcome of an ingest that may skip or replace by source.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngestReport {
+    /// Source groups (or sourceless batches) newly written.
+    pub inserted: usize,
+    /// Source groups skipped because content hashes matched existing points.
+    pub skipped: usize,
+    /// Source groups where old points were deleted then rewritten.
+    pub replaced: usize,
+    /// Points actually upserted (`inserted` + `replaced` groups' chunk totals).
+    pub chunks: usize,
+}
+
+/// Pure decision for re-ingest of one source's chunk set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReingestAction {
+    /// No existing points for this source — write new points.
+    Insert,
+    /// Existing points have the same multiset of content hashes — skip write.
+    Skip,
+    /// Existing points differ — delete source points, then write.
+    Replace,
+}
+
 #[derive(Debug, Clone)]
 pub struct CollectionConfig {
     pub name: String,
@@ -82,4 +140,12 @@ pub struct UpsertPoint {
 
 pub const DEFAULT_COLLECTION_NAME: &str = "default";
 
-pub const INDEX_FIELDS: &[&str] = &["source", "source_type", "collection", "ingest_hash"];
+/// Keyword payload indexes created on new collections (filter + lifecycle paths).
+pub const INDEX_FIELDS: &[&str] = &[
+    "source",
+    "source_type",
+    "collection",
+    "ingest_hash",
+    "project",
+    "tags",
+];

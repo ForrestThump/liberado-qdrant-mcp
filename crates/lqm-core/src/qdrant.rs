@@ -1,16 +1,21 @@
 use crate::chunking::{ChunkingStrategy, chunk_text};
 use crate::embedding::Embedder;
 use crate::error::LqmError;
+use crate::lifecycle::decide_source_reingest;
 use crate::types::{
-    ChunkConfig, CollectionInfoSummary, DocumentChunk, INDEX_FIELDS, SearchResult, UpsertPoint,
+    ChunkConfig, CollectionInfoSummary, DocumentChunk, INDEX_FIELDS, IngestReport, PayloadFilter,
+    ReingestAction, SearchResult, SourceSummary, UpsertPoint,
 };
 use qdrant_client::Qdrant as QdrantGrpc;
 use qdrant_client::qdrant::{
-    CollectionStatus, CreateCollection, CreateFieldIndexCollectionBuilder, DeleteCollection,
-    DenseVector, Distance, FieldType, Filter, PointId, PointStruct, ScoredPoint, SearchPoints,
-    UpsertPoints, Vector, VectorParams, Vectors, WithPayloadSelector, vector, vectors_config,
+    CollectionStatus, Condition, CountPointsBuilder, CreateCollection,
+    CreateFieldIndexCollectionBuilder, DeleteCollection, DeletePointsBuilder, DenseVector,
+    Distance, FieldType, Filter, PointId, PointStruct, ScoredPoint, ScrollPointsBuilder,
+    SearchPoints, UpsertPoints, Vector, VectorParams, Vectors, WithPayloadSelector, vector,
+    vectors_config,
 };
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -280,15 +285,178 @@ impl QdrantClient {
         collection: &str,
         field_name: &str,
     ) -> Result<(), QdrantError> {
-        self.inner
+        match self
+            .inner
             .create_field_index(CreateFieldIndexCollectionBuilder::new(
                 collection,
                 field_name,
                 FieldType::Keyword,
             ))
-            .await?;
-        Ok(())
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let msg = e.to_string().to_lowercase();
+                // Re-running ensure_indexes on existing collections is expected.
+                if msg.contains("already") || msg.contains("exists") {
+                    Ok(())
+                } else {
+                    Err(QdrantError::from(e))
+                }
+            }
+        }
     }
+
+    /// Scroll payload-only points (optionally filtered). Paginates until exhausted.
+    pub async fn scroll_payloads(
+        &self,
+        collection: &str,
+        filter: Option<Filter>,
+        page_size: u32,
+    ) -> Result<Vec<crate::types::Payload>, QdrantError> {
+        let mut out = Vec::new();
+        let mut offset: Option<PointId> = None;
+        let page = page_size.max(1);
+        loop {
+            let mut builder = ScrollPointsBuilder::new(collection)
+                .limit(page)
+                .with_payload(true)
+                .with_vectors(false);
+            if let Some(ref f) = filter {
+                builder = builder.filter(f.clone());
+            }
+            if let Some(off) = offset.clone() {
+                builder = builder.offset(off);
+            }
+            let resp = self.inner.scroll(builder).await?;
+            for pt in resp.result {
+                out.push(qdrant_payload_to_json(&pt.payload));
+            }
+            match resp.next_page_offset {
+                Some(next) => offset = Some(next),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn count_points(
+        &self,
+        collection: &str,
+        filter: Option<Filter>,
+    ) -> Result<u64, QdrantError> {
+        let mut builder = CountPointsBuilder::new(collection).exact(true);
+        if let Some(f) = filter {
+            builder = builder.filter(f);
+        }
+        let resp = self.inner.count(builder).await?;
+        Ok(resp.result.map(|r| r.count).unwrap_or(0))
+    }
+
+    pub async fn delete_points_by_filter(
+        &self,
+        collection: &str,
+        filter: Filter,
+    ) -> Result<u64, QdrantError> {
+        let deleted = self.count_points(collection, Some(filter.clone())).await?;
+        if deleted == 0 {
+            return Ok(0);
+        }
+        self.inner
+            .delete_points(
+                DeletePointsBuilder::new(collection)
+                    .points(filter)
+                    .wait(true),
+            )
+            .await?;
+        Ok(deleted)
+    }
+}
+
+fn keyword_match(key: &str, value: String) -> Condition {
+    Condition {
+        condition_one_of: Some(qdrant_client::qdrant::condition::ConditionOneOf::Field(
+            qdrant_client::qdrant::FieldCondition {
+                key: key.to_string(),
+                r#match: Some(qdrant_client::qdrant::Match {
+                    match_value: Some(qdrant_client::qdrant::r#match::MatchValue::Keyword(value)),
+                }),
+                ..Default::default()
+            },
+        )),
+    }
+}
+
+/// Build a Qdrant filter from payload fields (AND of all set fields).
+pub fn payload_filter_to_qdrant(f: &PayloadFilter) -> Option<Filter> {
+    if f.is_empty() {
+        return None;
+    }
+    let mut must = Vec::new();
+    if let Some(ref source) = f.source {
+        must.push(keyword_match("source", source.clone()));
+    }
+    if let Some(ref st) = f.source_type {
+        must.push(keyword_match("source_type", st.clone()));
+    }
+    if let Some(ref project) = f.project {
+        must.push(keyword_match("project", project.clone()));
+    }
+    if let Some(ref tags) = f.tags {
+        for t in tags {
+            must.push(keyword_match("tags", t.clone()));
+        }
+    }
+    if must.is_empty() {
+        None
+    } else {
+        Some(Filter {
+            must,
+            should: vec![],
+            must_not: vec![],
+            min_should: None,
+        })
+    }
+}
+
+fn qdrant_payload_to_json(
+    payload: &HashMap<String, qdrant_client::qdrant::Value>,
+) -> crate::types::Payload {
+    serde_json::to_value(
+        payload
+            .iter()
+            .map(|(k, v)| {
+                let json_val = match &v.kind {
+                    Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => {
+                        serde_json::Value::String(s.clone())
+                    }
+                    Some(qdrant_client::qdrant::value::Kind::ListValue(lv)) => {
+                        serde_json::Value::Array(
+                            lv.values
+                                .iter()
+                                .map(|item| match &item.kind {
+                                    Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => {
+                                        serde_json::Value::String(s.clone())
+                                    }
+                                    _ => serde_json::Value::String(format!("{:?}", item)),
+                                })
+                                .collect(),
+                        )
+                    }
+                    _ => serde_json::Value::String(format!("{:?}", v)),
+                };
+                (k.clone(), json_val)
+            })
+            .collect::<HashMap<_, _>>(),
+    )
+    .unwrap_or_default()
+}
+
+fn payload_str(payload: &serde_json::Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 fn scored_point_to_search_result(sp: &ScoredPoint) -> SearchResult {
@@ -433,83 +601,209 @@ impl RagCore {
         Ok(self.embedder.embed_batch(texts).await?)
     }
 
+    /// Embed and upsert chunks with skip/replace-by-source policy.
+    ///
+    /// For each `(collection, source)` group: compare content hashes to existing
+    /// points for that source — skip if identical multiset, replace (delete then
+    /// write) if different, insert if none exist. Chunks without a source always insert.
     pub async fn embed_and_upsert_batch(
         &self,
         chunks: Vec<DocumentChunk>,
-    ) -> Result<usize, LqmError> {
-        let count = chunks.len();
-        let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+    ) -> Result<IngestReport, LqmError> {
+        if chunks.is_empty() {
+            return Ok(IngestReport::default());
+        }
 
-        let embeddings = self.embed_batch(texts).await?;
-
-        let mut by_collection: std::collections::HashMap<String, Vec<UpsertPoint>> =
-            std::collections::HashMap::new();
-
-        for (chunk, vector) in chunks.into_iter().zip(embeddings) {
-            let ingest_hash = compute_ingest_hash(&chunk.text);
-            let target = chunk
+        // Group by (collection, source key). Empty source key = always-insert path.
+        let mut groups: HashMap<(String, String), Vec<DocumentChunk>> = HashMap::new();
+        for chunk in chunks {
+            let coll = chunk
                 .collection
                 .clone()
                 .unwrap_or_else(|| crate::types::DEFAULT_COLLECTION_NAME.to_string());
+            let source_key = chunk.source.clone().unwrap_or_default();
+            groups.entry((coll, source_key)).or_default().push(chunk);
+        }
 
-            let mut payload = serde_json::Map::new();
-            payload.insert("text".to_string(), serde_json::Value::String(chunk.text));
-            payload.insert(
-                "ingest_hash".to_string(),
-                serde_json::Value::String(ingest_hash),
-            );
-            if let Some(source) = chunk.source {
-                payload.insert("source".to_string(), serde_json::Value::String(source));
-            }
-            if let Some(source_type) = chunk.source_type {
-                payload.insert(
-                    "source_type".to_string(),
-                    serde_json::Value::String(source_type),
-                );
-            }
-            if let Some(tags) = chunk.tags {
-                payload.insert(
-                    "tags".to_string(),
-                    serde_json::Value::Array(
-                        tags.into_iter().map(serde_json::Value::String).collect(),
-                    ),
-                );
-            }
-            if let Some(timestamp) = chunk.timestamp {
-                payload.insert(
-                    "timestamp".to_string(),
-                    serde_json::Value::String(timestamp),
-                );
-            }
-            if let Some(project) = chunk.project {
-                payload.insert("project".to_string(), serde_json::Value::String(project));
-            }
-            if let Some(last_modified) = chunk.last_modified {
-                payload.insert(
-                    "last_modified".to_string(),
-                    serde_json::Value::String(last_modified),
-                );
-            }
+        let mut report = IngestReport::default();
 
-            let point = UpsertPoint {
-                id: uuid::Uuid::new_v4().to_string(),
-                vector,
-                payload: serde_json::Value::Object(payload),
+        for ((collection, source_key), group_chunks) in groups {
+            let new_hashes: Vec<String> = group_chunks
+                .iter()
+                .map(|c| compute_ingest_hash(&c.text))
+                .collect();
+
+            let action = if source_key.is_empty() {
+                ReingestAction::Insert
+            } else {
+                let existing = self.hashes_for_source(&collection, &source_key).await?;
+                decide_source_reingest(&existing, &new_hashes)
             };
 
-            by_collection.entry(target).or_default().push(point);
+            match action {
+                ReingestAction::Skip => {
+                    log::info!(
+                        "skipping re-ingest of source '{}' in '{}' ({} chunks unchanged)",
+                        source_key,
+                        collection,
+                        group_chunks.len()
+                    );
+                    report.skipped += 1;
+                    continue;
+                }
+                ReingestAction::Replace => {
+                    log::info!(
+                        "replacing source '{}' in '{}' ({} new chunks)",
+                        source_key,
+                        collection,
+                        group_chunks.len()
+                    );
+                    self.delete_by_source(&collection, &source_key).await?;
+                    report.replaced += 1;
+                }
+                ReingestAction::Insert => {
+                    report.inserted += 1;
+                }
+            }
+
+            let texts: Vec<String> = group_chunks.iter().map(|c| c.text.clone()).collect();
+            let embeddings = self.embed_batch(texts).await?;
+            let mut points = Vec::with_capacity(group_chunks.len());
+
+            for (chunk, vector) in group_chunks.into_iter().zip(embeddings) {
+                let ingest_hash = compute_ingest_hash(&chunk.text);
+                let mut payload = serde_json::Map::new();
+                payload.insert("text".to_string(), serde_json::Value::String(chunk.text));
+                payload.insert(
+                    "ingest_hash".to_string(),
+                    serde_json::Value::String(ingest_hash),
+                );
+                if let Some(source) = chunk.source {
+                    payload.insert("source".to_string(), serde_json::Value::String(source));
+                }
+                if let Some(source_type) = chunk.source_type {
+                    payload.insert(
+                        "source_type".to_string(),
+                        serde_json::Value::String(source_type),
+                    );
+                }
+                if let Some(tags) = chunk.tags {
+                    payload.insert(
+                        "tags".to_string(),
+                        serde_json::Value::Array(
+                            tags.into_iter().map(serde_json::Value::String).collect(),
+                        ),
+                    );
+                }
+                if let Some(timestamp) = chunk.timestamp {
+                    payload.insert(
+                        "timestamp".to_string(),
+                        serde_json::Value::String(timestamp),
+                    );
+                }
+                if let Some(project) = chunk.project {
+                    payload.insert("project".to_string(), serde_json::Value::String(project));
+                }
+                if let Some(last_modified) = chunk.last_modified {
+                    payload.insert(
+                        "last_modified".to_string(),
+                        serde_json::Value::String(last_modified),
+                    );
+                }
+
+                points.push(UpsertPoint {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    vector,
+                    payload: serde_json::Value::Object(payload),
+                });
+            }
+
+            let n = points.len();
+            self.qdrant.upsert_points(&collection, points).await?;
+            report.chunks += n;
         }
 
         log::info!(
-            "upserting {} chunks across {} collections",
-            count,
-            by_collection.len()
+            "ingest report: inserted={} skipped={} replaced={} chunks={}",
+            report.inserted,
+            report.skipped,
+            report.replaced,
+            report.chunks
         );
-        for (collection, points) in by_collection {
-            self.qdrant.upsert_points(&collection, points).await?;
-        }
+        Ok(report)
+    }
 
-        Ok(count)
+    async fn hashes_for_source(
+        &self,
+        collection: &str,
+        source: &str,
+    ) -> Result<Vec<String>, LqmError> {
+        let filter = payload_filter_to_qdrant(&PayloadFilter::for_source(source));
+        let payloads = self.qdrant.scroll_payloads(collection, filter, 256).await?;
+        Ok(payloads
+            .iter()
+            .filter_map(|p| payload_str(p, "ingest_hash"))
+            .collect())
+    }
+
+    /// List distinct sources in a collection with point counts and sample metadata.
+    pub async fn list_sources(&self, collection: &str) -> Result<Vec<SourceSummary>, LqmError> {
+        if !self.qdrant.collection_exists(collection).await? {
+            return Ok(vec![]);
+        }
+        let payloads = self.qdrant.scroll_payloads(collection, None, 256).await?;
+        let mut map: HashMap<String, SourceSummary> = HashMap::new();
+        for p in payloads {
+            let Some(source) = payload_str(&p, "source") else {
+                continue;
+            };
+            let entry = map.entry(source.clone()).or_insert_with(|| SourceSummary {
+                source,
+                count: 0,
+                source_type: None,
+                last_modified: None,
+            });
+            entry.count += 1;
+            if entry.source_type.is_none() {
+                entry.source_type = payload_str(&p, "source_type");
+            }
+            if entry.last_modified.is_none() {
+                entry.last_modified = payload_str(&p, "last_modified");
+            }
+        }
+        let mut sources: Vec<_> = map.into_values().collect();
+        sources.sort_by(|a, b| a.source.cmp(&b.source));
+        Ok(sources)
+    }
+
+    pub async fn delete_by_source(&self, collection: &str, source: &str) -> Result<u64, LqmError> {
+        if source.trim().is_empty() {
+            return Err(LqmError::Validation(
+                "source must not be empty for delete_by_source".to_string(),
+            ));
+        }
+        self.delete_by_filter(collection, &PayloadFilter::for_source(source))
+            .await
+    }
+
+    pub async fn delete_by_filter(
+        &self,
+        collection: &str,
+        filter: &PayloadFilter,
+    ) -> Result<u64, LqmError> {
+        if filter.is_empty() {
+            return Err(LqmError::Validation(
+                "delete_by_filter requires at least one of source, source_type, project, tags"
+                    .to_string(),
+            ));
+        }
+        if !self.qdrant.collection_exists(collection).await? {
+            return Ok(0);
+        }
+        let qf = payload_filter_to_qdrant(filter).ok_or_else(|| {
+            LqmError::Validation("delete_by_filter produced empty qdrant filter".to_string())
+        })?;
+        Ok(self.qdrant.delete_points_by_filter(collection, qf).await?)
     }
 
     pub async fn search(

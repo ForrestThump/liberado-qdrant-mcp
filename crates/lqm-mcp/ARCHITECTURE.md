@@ -22,7 +22,7 @@ lqm-mcp serve        → HTTP server (persistent, single model in RAM)
 
 | Tool | Role |
 |------|------|
-| `ingest_text` | Embed/upsert a text blob (auto-creates collection) |
+| `ingest_text` | Embed/upsert a text blob (auto-creates collection); skip/replace by source |
 | `ingest_path` | Walk file/dir via `lqm-ingest` extractors |
 | `ingest_url` | HTTP(S) fetch + HTML/plain extract → chunk/embed/upsert |
 | `search` | Semantic search; raw JSON hits |
@@ -31,6 +31,11 @@ lqm-mcp serve        → HTTP server (persistent, single model in RAM)
 | `create_collection` | Create/ensure; dim defaults to active embedder |
 | `delete_collection` | Drop collection |
 | `get_collection_info` | Points, vector size, distance, status |
+| `list_sources` | Distinct sources + counts in a collection |
+| `delete_by_source` | Remove all points for one source |
+| `delete_by_filter` | Delete by source/source_type/project/tags (AND) |
+
+Ingest tools return `{ inserted, skipped, replaced, chunks }` for agent accounting.
 
 All tools parse args and delegate to `RagCore` / `lqm-ingest` — no Qdrant/embed reimplementation in this binary.
 

@@ -8,7 +8,7 @@ use axum::{
 };
 use clap::Parser;
 use lqm_core::config::{EmbedderConfig, create_embedder};
-use lqm_core::types::{DEFAULT_COLLECTION_NAME, DocumentChunk, RagConfig};
+use lqm_core::types::{DEFAULT_COLLECTION_NAME, DocumentChunk, PayloadFilter, RagConfig};
 use lqm_core::{QdrantClient, RagCore};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -56,6 +56,20 @@ struct IngestBody {
     tags: Option<Vec<String>>,
     project: Option<String>,
     last_modified: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct CreateCollectionBody {
+    name: String,
+    vector_dim: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct DeleteByFilterBody {
+    source: Option<String>,
+    source_type: Option<String>,
+    project: Option<String>,
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -185,7 +199,7 @@ async fn ingest(
             )
         })?;
 
-    let count = state
+    let report = state
         .core
         .embed_and_upsert_batch(vec![chunk])
         .await
@@ -201,7 +215,145 @@ async fn ingest(
     Ok(Json(serde_json::json!({
         "status": "ok",
         "collection": collection,
-        "chunks_upserted": count,
+        "inserted": report.inserted,
+        "skipped": report.skipped,
+        "replaced": report.replaced,
+        "chunks": report.chunks,
+        "chunks_upserted": report.chunks,
+    })))
+}
+
+async fn create_collection(
+    State(state): State<AppState>,
+    Json(body): Json<CreateCollectionBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let dim = body.vector_dim.map(|d| d as usize);
+    let created = state
+        .core
+        .create_collection(&body.name, dim)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "name": body.name,
+        "created": created,
+        "vector_dim": dim.unwrap_or(state.embed_dimension),
+    })))
+}
+
+async fn get_collection_info(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    match state.core.get_collection_info(&name).await {
+        Ok(Some(info)) => Ok(Json(serde_json::json!({
+            "status": "ok",
+            "exists": true,
+            "name": info.name,
+            "points_count": info.points_count,
+            "indexed_vectors_count": info.indexed_vectors_count,
+            "segments_count": info.segments_count,
+            "collection_status": info.status,
+            "vector_size": info.vector_size,
+            "distance": info.distance,
+        }))),
+        Ok(None) => Ok(Json(serde_json::json!({
+            "status": "ok",
+            "exists": false,
+            "name": name,
+        }))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )),
+    }
+}
+
+async fn list_sources(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let sources = state.core.list_sources(&name).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "collection": name,
+        "sources": sources,
+    })))
+}
+
+async fn delete_by_source(
+    State(state): State<AppState>,
+    Path((name, source)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let deleted = state
+        .core
+        .delete_by_source(&name, &source)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "collection": name,
+        "source": source,
+        "deleted": deleted,
+    })))
+}
+
+async fn delete_by_filter(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<DeleteByFilterBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let filter = PayloadFilter {
+        source: body.source,
+        source_type: body.source_type,
+        project: body.project,
+        tags: body.tags,
+    };
+    let deleted = state
+        .core
+        .delete_by_filter(&name, &filter)
+        .await
+        .map_err(|e| {
+            let status = if e.to_string().contains("validation") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (
+                status,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "collection": name,
+        "deleted": deleted,
+        "filter": filter,
     })))
 }
 
@@ -232,8 +384,23 @@ async fn request_logger(
 fn build_router(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(health))
-        .route("/api/collections", get(list_collections))
-        .route("/api/collections/{name}", delete(delete_collection))
+        .route(
+            "/api/collections",
+            get(list_collections).post(create_collection),
+        )
+        .route(
+            "/api/collections/{name}",
+            get(get_collection_info).delete(delete_collection),
+        )
+        .route("/api/collections/{name}/sources", get(list_sources))
+        .route(
+            "/api/collections/{name}/sources/{source}",
+            delete(delete_by_source),
+        )
+        .route(
+            "/api/collections/{name}/delete_by_filter",
+            post(delete_by_filter),
+        )
         .route("/api/search", post(search))
         .route("/api/ingest", post(ingest))
         .with_state(state);

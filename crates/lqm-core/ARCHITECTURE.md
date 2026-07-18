@@ -19,15 +19,18 @@ src/
 ├── chunking.rs  — ChunkingStrategy, paragraph-aware sliding window chunk_text()
 ├── config.rs    — EmbedderConfig with TOML/env/load_or_default, create_embedder() factory
 ├── context.rs   — format_relevant_context() → markdown passages + structured sources
+├── lifecycle.rs — decide_source_reingest (skip/replace/insert); pure, unit-tested
 ├── embedding.rs — Embedder trait, FakeEmbedder, FastEmbedder/OllamaEmbedder/OpenAIEmbedder (feature-gated)
-└── qdrant.rs    — QdrantClient wrapper, RagCore orchestrator, compute_ingest_hash
+└── qdrant.rs    — QdrantClient wrapper, RagCore orchestrator, compute_ingest_hash, lifecycle I/O
 ```
 
 ## Key design decisions
 
 - `RagCore` uses `Arc<Semaphore>` to limit concurrent embedding calls
-- `compute_ingest_hash()` produces SHA256 hex for idempotent ingestion
-- `ensure_indexes()` creates keyword indexes on `source`, `source_type`, `collection`, `ingest_hash`
+- `compute_ingest_hash()` produces SHA256 hex; re-ingest compares hash multisets per source
+- `embed_and_upsert_batch` returns `IngestReport` (inserted/skipped/replaced/chunks)
+- `list_sources` / `delete_by_source` / `delete_by_filter` share scroll + filter builders
+- `ensure_indexes()` creates keyword indexes on source, source_type, collection, ingest_hash, project, tags
 - `create_collection` / `get_collection_info` / `delete_collection` are first-class on `RagCore` (create defaults vector dim from the active embedder)
 - `format_relevant_context` is pure (no I/O) so MCP/API/CLI can share LLM-ready formatting
 - Embedders are feature-gated (`embed-fastembed`, `embed-ollama`, `embed-openai`)
