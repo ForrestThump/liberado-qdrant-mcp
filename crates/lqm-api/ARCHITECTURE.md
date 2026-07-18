@@ -20,10 +20,13 @@ for all RAG logic; stays in parity with MCP tools (see `docs/AGENTS.md` matrix).
 | `GET` | `/api/collections/{name}` | info |
 | `DELETE` | `/api/collections/{name}` | delete |
 | `GET` | `/api/collections/{name}/sources` | list_sources |
+| `GET` | `/api/collections/{name}/sources/{source}` | get_source |
+| `GET` | `/api/collections/{name}/sources/{source}/chunks` | list_chunks (`offset`/`limit` query) |
 | `DELETE` | `/api/collections/{name}/sources/{source}` | delete_by_source |
 | `POST` | `/api/collections/{name}/delete_by_filter` | filter delete |
 | `POST` | `/api/search` | filters, hybrid, pagination |
 | `POST` | `/api/context` | get_relevant_context |
+| `POST` | `/api/expand_context` | neighbor window for source + chunk_index |
 | `POST` | `/api/ingest` | text; **structure-aware chunking** |
 | `POST` | `/api/ingest/path` | file/dir |
 | `POST` | `/api/ingest/url` | remote URL |
@@ -47,4 +50,4 @@ lqm-api --config embedder.toml --qdrant-url http://localhost:6334
 ## Static UI
 
 `static/index.html` is an interim dark-mode search page until a Dioxus SPA
-(ROADMAP P5). Not the product goal — agents should prefer MCP/HTTP tools.
+(`docs/ROADMAP.md` later/optional). Not the product goal — agents should prefer MCP/HTTP tools.

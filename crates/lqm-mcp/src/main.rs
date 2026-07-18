@@ -549,7 +549,7 @@ impl LqmServer {
 
         for p in paths {
             let display = p.to_string_lossy().to_string();
-            match lqm_ingest::extract_file(&p, serde_json::json!({})) {
+            match lqm_ingest::extract_file_async(&p, serde_json::json!({})).await {
                 Ok(extracted) => {
                     let mut file_chunk_count = 0usize;
                     for doc in extracted {
@@ -670,7 +670,7 @@ impl LqmServer {
         if let Some(paths) = paths {
             for path in paths {
                 let p = std::path::Path::new(&path);
-                match lqm_ingest::extract_file(p, serde_json::json!({})) {
+                match lqm_ingest::extract_file_async(p, serde_json::json!({})).await {
                     Ok(extracted) => {
                         let mut n = 0usize;
                         for doc in extracted {
@@ -858,6 +858,87 @@ impl LqmServer {
                 "sources": sources,
             })),
             Err(e) => Err(McpError::internal(format!("list_sources failed: {e}"))),
+        }
+    }
+
+    /// List indexed chunks for a source ordered by `chunk_index` (paginated).
+    ///
+    /// Reconstructs a parent document from the index without re-searching.
+    /// `source` is a pointer (path/URL/id), not a blob. Missing chunk_index sorts last.
+    #[tool]
+    async fn list_chunks(
+        &self,
+        source: String,
+        collection: Option<String>,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> McpResult<Value> {
+        let collection = resolve_collection(collection);
+        match self
+            .core()
+            .list_chunks(&collection, &source, offset, limit)
+            .await
+        {
+            Ok(page) => Ok(serde_json::json!({
+                "status": "ok",
+                "collection": collection,
+                "source": page.source,
+                "chunks": page.chunks,
+                "offset": page.offset,
+                "limit": page.limit,
+                "total": page.total,
+                "has_more": page.has_more,
+                "next_offset": page.next_offset,
+            })),
+            Err(e) => Err(McpError::internal(format!("list_chunks failed: {e}"))),
+        }
+    }
+
+    /// Reconstruct a full source: all chunks in index order plus joined text.
+    #[tool]
+    async fn get_source(&self, source: String, collection: Option<String>) -> McpResult<Value> {
+        let collection = resolve_collection(collection);
+        match self.core().get_source(&collection, &source).await {
+            Ok(doc) => Ok(serde_json::json!({
+                "status": "ok",
+                "collection": collection,
+                "source": doc.source,
+                "source_type": doc.source_type,
+                "total": doc.total,
+                "text": doc.text,
+                "chunks": doc.chunks,
+            })),
+            Err(e) => Err(McpError::internal(format!("get_source failed: {e}"))),
+        }
+    }
+
+    /// Neighboring chunks of the same source around `chunk_index` (±`neighbors`).
+    ///
+    /// Use after a search hit to expand context without inventing content.
+    #[tool]
+    async fn expand_context(
+        &self,
+        source: String,
+        chunk_index: u64,
+        collection: Option<String>,
+        neighbors: Option<u64>,
+    ) -> McpResult<Value> {
+        let collection = resolve_collection(collection);
+        match self
+            .core()
+            .expand_context(&collection, &source, chunk_index, neighbors)
+            .await
+        {
+            Ok(chunks) => Ok(serde_json::json!({
+                "status": "ok",
+                "collection": collection,
+                "source": source,
+                "chunk_index": chunk_index,
+                "neighbors": neighbors.unwrap_or(lqm_core::DEFAULT_EXPAND_NEIGHBORS),
+                "count": chunks.len(),
+                "chunks": chunks,
+            })),
+            Err(e) => Err(McpError::internal(format!("expand_context failed: {e}"))),
         }
     }
 
@@ -1129,6 +1210,43 @@ async fn test_all_mcp_tools_live_smoke() {
             .iter()
             .any(|s| s["source"].as_str() == Some("smoke://text")),
         "list_sources missing smoke://text: {sources}"
+    );
+
+    // 4e) list_chunks / get_source / expand_context (source reconstruction)
+    let listed_chunks = server
+        .list_chunks(
+            "smoke://text".to_string(),
+            Some(coll.clone()),
+            Some(0),
+            Some(10),
+        )
+        .await
+        .expect("list_chunks");
+    assert_eq!(listed_chunks["status"], "ok", "{listed_chunks}");
+    assert!(
+        listed_chunks["total"].as_u64().unwrap_or(0) >= 1,
+        "list_chunks total: {listed_chunks}"
+    );
+    let got_src = server
+        .get_source("smoke://text".to_string(), Some(coll.clone()))
+        .await
+        .expect("get_source");
+    assert_eq!(got_src["status"], "ok", "{got_src}");
+    assert!(
+        got_src["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("orange kites"),
+        "get_source text: {got_src}"
+    );
+    let expanded = server
+        .expand_context("smoke://text".to_string(), 0, Some(coll.clone()), Some(1))
+        .await
+        .expect("expand_context");
+    assert_eq!(expanded["status"], "ok", "{expanded}");
+    assert!(
+        expanded["count"].as_u64().unwrap_or(0) >= 1,
+        "expand_context: {expanded}"
     );
 
     // 5) ingest_path — real temp file
@@ -1584,6 +1702,169 @@ async fn test_scope_filter_live_smoke() {
     let _ = server.delete_collection(coll.to_string()).await;
 }
 
+/// Source reconstruction: multi-chunk ordered list, pagination, expand neighbors.
+///
+/// Skips when Qdrant is down. Set `LQM_LIVE=1` to hard-require.
+#[tokio::test]
+async fn test_source_reconstruction_live_smoke() {
+    let Some(server) = live_test_server().await else {
+        return;
+    };
+    let coll = "lqm_smoke_reconstruction";
+    let src = "recon://multi-doc";
+    let _ = server.delete_collection(coll.to_string()).await;
+    server
+        .create_collection(coll.to_string(), None)
+        .await
+        .expect("create_collection");
+
+    // Upsert four ordered chunks for one source (via core path agents' ingest uses).
+    let mut batch = Vec::new();
+    for i in 0..4usize {
+        batch.push(DocumentChunk {
+            text: format!(
+                "Reconstruction chunk index {i} with unique token_recon_{i} for ordering tests."
+            ),
+            source: Some(src.to_string()),
+            source_type: Some(constants::SOURCE_TYPE_TEXT.to_string()),
+            collection: Some(coll.to_string()),
+            tags: Some(vec!["recon".to_string()]),
+            timestamp: None,
+            project: None,
+            last_modified: None,
+            chunk_index: Some(i),
+            total_chunks: Some(4),
+            importance: None,
+            memory_id: None,
+            scope: None,
+            clearance: None,
+        });
+    }
+    // Insert in reverse order so list_chunks must sort, not rely on upsert order.
+    batch.reverse();
+    server
+        .core()
+        .embed_and_upsert_batch(batch)
+        .await
+        .expect("upsert multi-chunk source");
+
+    // Full ordered page
+    let page = server
+        .list_chunks(src.to_string(), Some(coll.to_string()), Some(0), Some(10))
+        .await
+        .expect("list_chunks all");
+    assert_eq!(page["status"], "ok", "{page}");
+    assert_eq!(page["total"], 4, "{page}");
+    assert_eq!(page["has_more"], false, "{page}");
+    let chunks = page["chunks"].as_array().expect("chunks");
+    assert_eq!(chunks.len(), 4, "{page}");
+    for (i, c) in chunks.iter().enumerate() {
+        let idx = c["chunk_index"]
+            .as_u64()
+            .or_else(|| c["chunk_index"].as_str().and_then(|s| s.parse().ok()));
+        assert_eq!(idx, Some(i as u64), "ordered chunk_index at {i}: {c}");
+        assert!(
+            c["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains(&format!("token_recon_{i}")),
+            "text at {i}: {c}"
+        );
+        assert_eq!(c["source"].as_str(), Some(src));
+    }
+
+    // Pagination: limit < total
+    let p0 = server
+        .list_chunks(src.to_string(), Some(coll.to_string()), Some(0), Some(2))
+        .await
+        .expect("list_chunks page0");
+    assert_eq!(p0["total"], 4);
+    assert_eq!(p0["has_more"], true, "{p0}");
+    assert_eq!(p0["next_offset"], 2, "{p0}");
+    assert_eq!(p0["chunks"].as_array().unwrap().len(), 2);
+    let p1 = server
+        .list_chunks(src.to_string(), Some(coll.to_string()), Some(2), Some(2))
+        .await
+        .expect("list_chunks page1");
+    assert_eq!(p1["has_more"], false, "{p1}");
+    assert_eq!(p1["chunks"].as_array().unwrap().len(), 2);
+    assert!(
+        p1["chunks"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("token_recon_2"),
+        "{p1}"
+    );
+
+    // get_source joins ordered text
+    let doc = server
+        .get_source(src.to_string(), Some(coll.to_string()))
+        .await
+        .expect("get_source");
+    assert_eq!(doc["total"], 4, "{doc}");
+    let text = doc["text"].as_str().unwrap_or("");
+    for i in 0..4 {
+        assert!(
+            text.contains(&format!("token_recon_{i}")),
+            "missing token {i} in {text}"
+        );
+    }
+    let pos0 = text.find("token_recon_0").expect("t0");
+    let pos3 = text.find("token_recon_3").expect("t3");
+    assert!(pos0 < pos3, "joined text should keep index order");
+
+    // expand_context ±1 around chunk 1 → indices 0,1,2 only
+    let exp = server
+        .expand_context(src.to_string(), 1, Some(coll.to_string()), Some(1))
+        .await
+        .expect("expand_context");
+    assert_eq!(exp["count"], 3, "{exp}");
+    let exp_chunks = exp["chunks"].as_array().unwrap();
+    let indices: Vec<u64> = exp_chunks
+        .iter()
+        .map(|c| {
+            c["chunk_index"]
+                .as_u64()
+                .or_else(|| c["chunk_index"].as_str().and_then(|s| s.parse().ok()))
+                .expect("chunk_index")
+        })
+        .collect();
+    assert_eq!(indices, vec![0, 1, 2], "{exp}");
+    for c in exp_chunks {
+        assert_eq!(c["source"].as_str(), Some(src));
+    }
+
+    // empty source → validation error (no panic)
+    let empty_src = server
+        .list_chunks("".to_string(), Some(coll.to_string()), None, None)
+        .await;
+    assert!(
+        empty_src.is_err(),
+        "empty source should fail: {empty_src:?}"
+    );
+
+    // missing source → empty page
+    let missing = server
+        .list_chunks(
+            "recon://does-not-exist".to_string(),
+            Some(coll.to_string()),
+            Some(0),
+            Some(10),
+        )
+        .await
+        .expect("list missing");
+    assert_eq!(missing["total"], 0, "{missing}");
+    assert!(
+        missing["chunks"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false),
+        "{missing}"
+    );
+
+    let _ = server.delete_collection(coll.to_string()).await;
+}
+
 /// P0 lifecycle smoke: list_sources, skip/replace, delete_by_source (skips if no Qdrant).
 #[tokio::test]
 async fn test_p0_lifecycle_live_smoke() {
@@ -1912,6 +2193,156 @@ async fn test_multiple_collections_independence() {
 
     let _ = core.delete_collection(coll_a).await;
     let _ = core.delete_collection(coll_b).await;
+}
+
+// ── Offline MCP integration (McpTestClient + FakeEmbedder; no live Qdrant) ──
+
+/// Build `LqmServer` with FakeEmbedder and a lazy Qdrant client (no health check).
+///
+/// Suitable for tool-registration and tools that never call Qdrant. Does **not**
+/// replace live smokes for ingest/search/lifecycle.
+#[cfg(test)]
+async fn offline_test_server(dim: usize) -> LqmServer {
+    let qdrant = lqm_core::QdrantClient::new_lazy("http://127.0.0.1:9")
+        .expect("lazy Qdrant client builds without network");
+    let embedder = Box::new(lqm_core::FakeEmbedder::new(dim));
+    let core = RagCore::new(qdrant, embedder, Some(1));
+    LqmServer::new(core).await
+}
+
+/// Tool names that must appear in MCP registration (representative of the surface).
+#[cfg(test)]
+const EXPECTED_OFFLINE_TOOLS: &[&str] = &[
+    "ingest_text",
+    "search",
+    "get_relevant_context",
+    "list_collections",
+    "create_collection",
+    "delete_collection",
+    "get_collection_info",
+    "ingest_path",
+    "ingest_url",
+    "ingest_many",
+    "get_embedder_info",
+    "store_memory",
+    "recall_memories",
+    "list_sources",
+    "list_chunks",
+    "get_source",
+    "expand_context",
+    "delete_by_source",
+    "delete_by_filter",
+];
+
+/// Offline: McpTestClient lists tools from the real `#[server]` handler (no Qdrant).
+#[tokio::test]
+async fn offline_mcp_tool_registration() {
+    use turbomcp::testing::McpTestClient;
+
+    let server = offline_test_server(32).await;
+    let client = McpTestClient::new(server);
+
+    let info = client.server_info();
+    assert_eq!(info.name, "liberado-qdrant-mcp");
+    assert!(!info.version.is_empty(), "version should be set");
+
+    let tools = client.list_tools();
+    assert!(
+        !tools.is_empty(),
+        "registered tools must be non-empty (macro surface)"
+    );
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    for expected in EXPECTED_OFFLINE_TOOLS {
+        assert!(
+            names.contains(expected),
+            "missing tool {expected:?}; have {names:?}"
+        );
+        client.assert_tool_exists(expected);
+    }
+    assert!(
+        tools.len() >= EXPECTED_OFFLINE_TOOLS.len(),
+        "tool count {} < expected {}",
+        tools.len(),
+        EXPECTED_OFFLINE_TOOLS.len()
+    );
+}
+
+/// Offline: get_embedder_info via real tool dispatch (FakeEmbedder, no Qdrant I/O).
+#[tokio::test]
+async fn offline_mcp_get_embedder_info() {
+    use turbomcp::testing::McpTestClient;
+
+    let dim = 48usize;
+    let server = offline_test_server(dim).await;
+    let client = McpTestClient::new(server);
+
+    let result = client
+        .call_tool("get_embedder_info", serde_json::json!({}))
+        .await
+        .expect("get_embedder_info should succeed offline");
+    assert!(!result.is_error(), "tool should not report isError");
+    let text = result
+        .first_text()
+        .expect("embedder info should return text/JSON content");
+    let v: serde_json::Value =
+        serde_json::from_str(text).unwrap_or_else(|_| serde_json::json!({ "raw": text }));
+    // structuredContent may also be present; prefer parsing text or structured
+    let payload = result.structured_content.clone().unwrap_or(v);
+    assert_eq!(payload["status"], "ok", "{payload}");
+    assert_eq!(payload["id"], "fake", "{payload}");
+    assert_eq!(payload["dimension"], dim as u64, "{payload}");
+}
+
+/// Offline: validation paths that fail before any Qdrant RPC (tool dispatch via client).
+#[tokio::test]
+async fn offline_mcp_validation_errors() {
+    use turbomcp::testing::McpTestClient;
+
+    let server = offline_test_server(16).await;
+    let client = McpTestClient::new(server);
+
+    // Empty collection name → RagCore validation (no Qdrant call).
+    let empty_name = client
+        .call_tool("create_collection", serde_json::json!({ "name": "   " }))
+        .await;
+    assert!(
+        empty_name.is_err() || empty_name.as_ref().map(|r| r.is_error()).unwrap_or(false),
+        "empty collection name must fail: {empty_name:?}"
+    );
+    if let Err(e) = &empty_name {
+        let msg = e.to_string().to_lowercase();
+        assert!(
+            msg.contains("empty") || msg.contains("validation") || msg.contains("create"),
+            "unexpected error text: {e}"
+        );
+    }
+
+    // Empty delete filter → validation before Qdrant.
+    let empty_filter = client
+        .call_tool(
+            "delete_by_filter",
+            serde_json::json!({
+                "collection": "offline_dummy"
+            }),
+        )
+        .await;
+    assert!(
+        empty_filter.is_err() || empty_filter.as_ref().map(|r| r.is_error()).unwrap_or(false),
+        "empty delete_by_filter must fail: {empty_filter:?}"
+    );
+}
+
+/// Offline: unknown tool name is rejected by the real handler dispatch.
+#[tokio::test]
+async fn offline_mcp_unknown_tool() {
+    use turbomcp::testing::McpTestClient;
+
+    let server = offline_test_server(8).await;
+    let client = McpTestClient::new(server);
+    let err = client
+        .call_tool("definitely_not_a_real_tool", serde_json::json!({}))
+        .await;
+    assert!(err.is_err(), "unknown tool must error: {err:?}");
 }
 
 #[tokio::main]

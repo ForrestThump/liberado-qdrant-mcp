@@ -290,6 +290,8 @@ pub struct RagConfig {
     pub embed_semaphore_permits: usize,
     pub chunk: ChunkConfig,
     pub auto_index: bool,
+    /// How hybrid keyword candidates are obtained (see `LQM_HYBRID_KEYWORD_BACKEND`).
+    pub hybrid_keyword_backend: crate::hybrid::HybridKeywordBackend,
 }
 
 impl Default for RagConfig {
@@ -299,6 +301,7 @@ impl Default for RagConfig {
             embed_semaphore_permits: num_cpus::get(),
             chunk: ChunkConfig::default(),
             auto_index: true,
+            hybrid_keyword_backend: crate::hybrid::hybrid_keyword_backend_from_env(),
         }
     }
 }
@@ -307,6 +310,8 @@ impl Default for RagConfig {
 pub struct UpsertPoint {
     pub id: String,
     pub vector: Vec<f32>,
+    /// Optional sparse lexical vector (indices + values) for hybrid sparse backend.
+    pub sparse: Option<(Vec<u32>, Vec<f32>)>,
     pub payload: Payload,
 }
 

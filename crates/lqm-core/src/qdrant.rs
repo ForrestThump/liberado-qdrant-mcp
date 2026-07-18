@@ -6,6 +6,10 @@
 use crate::chunking::{ChunkingStrategy, chunk_text};
 use crate::embedding::Embedder;
 use crate::error::LqmError;
+use crate::hybrid::{
+    HybridKeywordBackend, encode_sparse_tf, keyword_candidates_from_payloads, text_index_query,
+    tokenize_for_keyword,
+};
 use crate::lifecycle::decide_source_reingest;
 use crate::types::{
     ChunkConfig, CollectionInfoSummary, DocumentChunk, EmbedderInfo, INDEX_FIELDS, IngestReport,
@@ -16,8 +20,9 @@ use qdrant_client::Qdrant as QdrantGrpc;
 use qdrant_client::qdrant::{
     CollectionStatus, Condition, CountPointsBuilder, CreateCollection,
     CreateFieldIndexCollectionBuilder, DeleteCollection, DeletePointsBuilder, DenseVector,
-    Distance, FieldType, Filter, PointId, PointStruct, ScoredPoint, ScrollPointsBuilder,
-    SearchPoints, UpsertPoints, Vector, VectorParams, Vectors, WithPayloadSelector, vector,
+    Distance, FieldType, Filter, NamedVectors, PointId, PointStruct, ScoredPoint,
+    ScrollPointsBuilder, SearchPoints, SparseIndices, SparseVectorConfig, SparseVectorParams,
+    TokenizerType, UpsertPoints, Vector, VectorParams, Vectors, WithPayloadSelector, vector,
     vectors_config,
 };
 use sha2::{Digest, Sha256};
@@ -47,15 +52,24 @@ impl QdrantClient {
     ///
     /// The gRPC client constructor is synchronous; the `.await` is the health check.
     pub async fn new(url: &str) -> Result<Self, QdrantError> {
-        let qdrant = QdrantGrpc::from_url(url)
-            .build()
-            .map_err(|e| QdrantError::Qdrant(e.to_string()))?;
-        let client = Self {
-            inner: Arc::new(qdrant),
-        };
+        let client = Self::new_lazy(url)?;
         // Fail fast when Qdrant is unreachable rather than on the first tool call.
         client.list_collections().await?;
         Ok(client)
+    }
+
+    /// Build a gRPC client **without** a connectivity probe.
+    ///
+    /// Useful for offline MCP harnesses that need a `RagCore` for tools that never
+    /// touch Qdrant (e.g. `get_embedder_info`, pure validation). Production paths
+    /// should keep using [`Self::new`].
+    pub fn new_lazy(url: &str) -> Result<Self, QdrantError> {
+        let qdrant = QdrantGrpc::from_url(url)
+            .build()
+            .map_err(|e| QdrantError::Qdrant(e.to_string()))?;
+        Ok(Self {
+            inner: Arc::new(qdrant),
+        })
     }
 
     pub async fn list_collections(&self) -> Result<Vec<String>, QdrantError> {
@@ -69,10 +83,31 @@ impl QdrantClient {
     }
 
     pub async fn create_collection(&self, name: &str, vector_dim: u64) -> Result<(), QdrantError> {
+        self.create_collection_with_sparse(name, vector_dim, false)
+            .await
+    }
+
+    /// Create a collection with unnamed dense cosine vectors; optionally add named sparse `"sparse"`.
+    pub async fn create_collection_with_sparse(
+        &self,
+        name: &str,
+        vector_dim: u64,
+        with_sparse: bool,
+    ) -> Result<(), QdrantError> {
         let exists = self.collection_exists(name).await?;
         if exists {
             return Ok(());
         }
+        let sparse_vectors_config = if with_sparse {
+            Some(SparseVectorConfig {
+                map: HashMap::from([(
+                    crate::constants::SPARSE_VECTOR_NAME.to_string(),
+                    SparseVectorParams::default(),
+                )]),
+            })
+        } else {
+            None
+        };
         match self
             .inner
             .create_collection(CreateCollection {
@@ -86,6 +121,7 @@ impl QdrantClient {
                         },
                     )),
                 }),
+                sparse_vectors_config,
                 ..Default::default()
             })
             .await
@@ -180,6 +216,25 @@ impl QdrantClient {
         }
     }
 
+    fn make_point_vectors(dense: Vec<f32>, sparse: Option<(Vec<u32>, Vec<f32>)>) -> Vectors {
+        match sparse {
+            Some((indices, values)) if !indices.is_empty() && indices.len() == values.len() => {
+                let named = NamedVectors::default()
+                    .add_vector("", Self::make_dense_vector(dense))
+                    .add_vector(
+                        crate::constants::SPARSE_VECTOR_NAME,
+                        Vector::new_sparse(indices, values),
+                    );
+                Vectors::from(named)
+            }
+            _ => Vectors {
+                vectors_options: Some(qdrant_client::qdrant::vectors::VectorsOptions::Vector(
+                    Self::make_dense_vector(dense),
+                )),
+            },
+        }
+    }
+
     pub async fn upsert_points(
         &self,
         collection: &str,
@@ -237,13 +292,7 @@ impl QdrantClient {
                     id: Some(PointId {
                         point_id_options: Some(PointIdOptions::Uuid(p.id)),
                     }),
-                    vectors: Some(Vectors {
-                        vectors_options: Some(
-                            qdrant_client::qdrant::vectors::VectorsOptions::Vector(
-                                Self::make_dense_vector(p.vector),
-                            ),
-                        ),
-                    }),
+                    vectors: Some(Self::make_point_vectors(p.vector, p.sparse)),
                     payload: payload_map,
                 }
             })
@@ -305,6 +354,47 @@ impl QdrantClient {
         Ok(results)
     }
 
+    /// Sparse-vector search against named sparse vector [`crate::constants::SPARSE_VECTOR_NAME`].
+    pub async fn search_sparse(
+        &self,
+        collection: &str,
+        indices: Vec<u32>,
+        values: Vec<f32>,
+        limit: u64,
+        filter: Option<Filter>,
+    ) -> Result<Vec<SearchResult>, QdrantError> {
+        if indices.is_empty() || indices.len() != values.len() {
+            return Ok(vec![]);
+        }
+        let search = SearchPoints {
+            collection_name: collection.to_string(),
+            vector: values,
+            limit,
+            filter,
+            with_payload: Some(WithPayloadSelector {
+                selector_options: Some(
+                    qdrant_client::qdrant::with_payload_selector::SelectorOptions::Enable(true),
+                ),
+            }),
+            params: None,
+            score_threshold: None,
+            offset: None,
+            vector_name: Some(crate::constants::SPARSE_VECTOR_NAME.to_string()),
+            with_vectors: None,
+            read_consistency: None,
+            timeout: None,
+            shard_key_selector: None,
+            sparse_indices: Some(SparseIndices { data: indices }),
+        };
+
+        let resp = self.inner.search_points(search).await?;
+        Ok(resp
+            .result
+            .into_iter()
+            .map(|p| scored_point_to_search_result(&p))
+            .collect())
+    }
+
     pub async fn create_field_index(
         &self,
         collection: &str,
@@ -323,6 +413,39 @@ impl QdrantClient {
             Err(e) => {
                 let msg = e.to_string().to_lowercase();
                 // Re-running ensure_indexes on existing collections is expected.
+                if msg.contains("already") || msg.contains("exists") {
+                    Ok(())
+                } else {
+                    Err(QdrantError::from(e))
+                }
+            }
+        }
+    }
+
+    /// Full-text payload index on a string field (Word tokenizer, lowercase, min token len 2).
+    pub async fn create_text_field_index(
+        &self,
+        collection: &str,
+        field_name: &str,
+    ) -> Result<(), QdrantError> {
+        use qdrant_client::qdrant::TextIndexParamsBuilder;
+        use qdrant_client::qdrant::payload_index_params::IndexParams;
+
+        let params = TextIndexParamsBuilder::new(TokenizerType::Word)
+            .lowercase(true)
+            .min_token_len(2)
+            .build();
+        match self
+            .inner
+            .create_field_index(
+                CreateFieldIndexCollectionBuilder::new(collection, field_name, FieldType::Text)
+                    .field_index_params(IndexParams::TextIndexParams(params)),
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let msg = e.to_string().to_lowercase();
                 if msg.contains("already") || msg.contains("exists") {
                     Ok(())
                 } else {
@@ -590,6 +713,7 @@ pub struct RagCore {
     embed_semaphore: Arc<Semaphore>,
     chunk_config: ChunkConfig,
     auto_index: bool,
+    hybrid_keyword_backend: HybridKeywordBackend,
 }
 
 impl RagCore {
@@ -609,6 +733,7 @@ impl RagCore {
             embed_semaphore: Arc::new(Semaphore::new(permits)),
             chunk_config: ChunkConfig::default(),
             auto_index: true,
+            hybrid_keyword_backend: HybridKeywordBackend::default(),
         }
     }
 
@@ -622,6 +747,11 @@ impl RagCore {
         self
     }
 
+    pub fn with_hybrid_keyword_backend(mut self, backend: HybridKeywordBackend) -> Self {
+        self.hybrid_keyword_backend = backend;
+        self
+    }
+
     pub fn from_config(
         qdrant: QdrantClient,
         embedder: Box<dyn Embedder>,
@@ -630,12 +760,14 @@ impl RagCore {
         Self::new(qdrant, embedder, Some(config.embed_semaphore_permits))
             .with_chunk_config(config.chunk.clone())
             .with_auto_index(config.auto_index)
+            .with_hybrid_keyword_backend(config.hybrid_keyword_backend)
     }
 
     /// Build `RagCore` from environment / optional config file and `QDRANT_URL`.
     ///
     /// - Embedder: `EmbedderConfig::load_or_default(config_path)`
     /// - Qdrant URL: `qdrant_url` if provided, else `QDRANT_URL`, else `DEFAULT_QDRANT_URL`
+    /// - Hybrid keyword backend: `LQM_HYBRID_KEYWORD_BACKEND` (default `keyword_index`)
     pub async fn from_env(
         qdrant_url: Option<&str>,
         config_path: Option<&str>,
@@ -662,6 +794,11 @@ impl RagCore {
     /// Whether payload indexes are auto-created on `ensure_collection`.
     pub fn auto_index(&self) -> bool {
         self.auto_index
+    }
+
+    /// Hybrid keyword candidate backend (`scroll` | `sparse` | `keyword_index`).
+    pub fn hybrid_keyword_backend(&self) -> HybridKeywordBackend {
+        self.hybrid_keyword_backend
     }
 
     pub async fn delete_collection(&self, name: &str) -> Result<bool, LqmError> {
@@ -693,6 +830,15 @@ impl RagCore {
         let existed = self.qdrant.collection_exists(name).await?;
         // ensure_collection re-checks + creates with already-exists tolerance (TOCTOU-safe).
         self.ensure_collection(name, Some(dim)).await?;
+        if !existed {
+            log::info!(
+                "collection '{}' ready (dim={}, hybrid_keyword_backend={}, sparse_schema={})",
+                name,
+                dim,
+                self.hybrid_keyword_backend,
+                self.hybrid_keyword_backend.needs_sparse_schema()
+            );
+        }
         Ok(!existed)
     }
 
@@ -788,15 +934,28 @@ impl RagCore {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| self.embedder.id().to_string());
 
+            let write_sparse = self.hybrid_keyword_backend.needs_sparse_schema();
             for (pos, (chunk, vector)) in group_chunks.into_iter().zip(embeddings).enumerate() {
                 let chunk_index = chunk.chunk_index.unwrap_or(pos);
                 let total_chunks = chunk.total_chunks.unwrap_or(group_len);
                 let payload =
                     build_point_payload(&chunk, chunk_index, total_chunks, &embedding_model);
 
+                let sparse = if write_sparse {
+                    let enc = encode_sparse_tf(&chunk.text);
+                    if enc.is_empty() {
+                        None
+                    } else {
+                        Some((enc.indices, enc.values))
+                    }
+                } else {
+                    None
+                };
+
                 points.push(UpsertPoint {
                     id: uuid::Uuid::new_v4().to_string(),
                     vector,
+                    sparse,
                     payload: serde_json::Value::Object(payload),
                 });
             }
@@ -875,6 +1034,90 @@ impl RagCore {
             .await
     }
 
+    /// Fetch all payload points for a source (unordered scroll).
+    async fn payloads_for_source(
+        &self,
+        collection: &str,
+        source: &str,
+    ) -> Result<Vec<crate::types::Payload>, LqmError> {
+        if source.trim().is_empty() {
+            return Err(LqmError::Validation(
+                "source must not be empty for source reconstruction".to_string(),
+            ));
+        }
+        if !self.qdrant.collection_exists(collection).await? {
+            return Ok(vec![]);
+        }
+        let filter = payload_filter_to_qdrant(&PayloadFilter::for_source(source));
+        Ok(self
+            .qdrant
+            .scroll_payloads(collection, filter, crate::constants::SCROLL_PAGE_SIZE)
+            .await?)
+    }
+
+    /// List chunks for a source ordered by `chunk_index` with pagination.
+    ///
+    /// Missing `chunk_index` sorts last. `limit=0` returns an empty page (same
+    /// as search). Default limit is [`crate::reconstruction::DEFAULT_LIST_CHUNKS_LIMIT`].
+    pub async fn list_chunks(
+        &self,
+        collection: &str,
+        source: &str,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<crate::reconstruction::SourceChunkPage, LqmError> {
+        let payloads = self.payloads_for_source(collection, source).await?;
+        let chunks: Vec<_> = payloads
+            .into_iter()
+            .map(crate::reconstruction::source_chunk_from_payload)
+            .collect();
+        let offset = offset.unwrap_or(0);
+        let limit = limit.unwrap_or(crate::reconstruction::DEFAULT_LIST_CHUNKS_LIMIT);
+        Ok(crate::reconstruction::paginate_source_chunks(
+            chunks, source, offset, limit,
+        ))
+    }
+
+    /// Reconstruct a full source: all chunks ordered + joined text.
+    pub async fn get_source(
+        &self,
+        collection: &str,
+        source: &str,
+    ) -> Result<crate::reconstruction::SourceDocument, LqmError> {
+        let payloads = self.payloads_for_source(collection, source).await?;
+        let chunks: Vec<_> = payloads
+            .into_iter()
+            .map(crate::reconstruction::source_chunk_from_payload)
+            .collect();
+        Ok(crate::reconstruction::source_document_from_chunks(
+            source, chunks,
+        ))
+    }
+
+    /// Neighboring chunks of the same source around `chunk_index` (±`neighbors`).
+    ///
+    /// Default neighbors is [`crate::reconstruction::DEFAULT_EXPAND_NEIGHBORS`].
+    /// Only indexed chunks already stored for that source are returned.
+    pub async fn expand_context(
+        &self,
+        collection: &str,
+        source: &str,
+        chunk_index: u64,
+        neighbors: Option<u64>,
+    ) -> Result<Vec<crate::reconstruction::SourceChunk>, LqmError> {
+        let payloads = self.payloads_for_source(collection, source).await?;
+        let chunks: Vec<_> = payloads
+            .into_iter()
+            .map(crate::reconstruction::source_chunk_from_payload)
+            .collect();
+        let neighbors = neighbors.unwrap_or(crate::reconstruction::DEFAULT_EXPAND_NEIGHBORS);
+        Ok(crate::reconstruction::expand_chunk_neighbors(
+            &chunks,
+            chunk_index,
+            neighbors,
+        ))
+    }
+
     pub async fn delete_by_filter(
         &self,
         collection: &str,
@@ -933,8 +1176,8 @@ impl RagCore {
 
     /// Filtered semantic search with offset pagination (`has_more` / `next_offset`).
     ///
-    /// When `opts.hybrid` is true, over-fetches dense hits, optionally merges
-    /// keyword-matching scroll candidates, and fuses with
+    /// When `opts.hybrid` is true, over-fetches dense hits, merges keyword
+    /// candidates from [`Self::hybrid_keyword_backend`], and fuses with
     /// [`crate::hybrid::merge_and_fuse_hybrid`]. Dense-only when hybrid is false.
     pub async fn search_page(
         &self,
@@ -960,12 +1203,13 @@ impl RagCore {
         }
 
         log::debug!(
-            "searching '{}' in '{}' (limit:{} offset:{} hybrid:{})",
+            "searching '{}' in '{}' (limit:{} offset:{} hybrid:{} keyword_backend:{})",
             query,
             collection,
             limit,
             offset,
-            opts.hybrid
+            opts.hybrid,
+            self.hybrid_keyword_backend
         );
 
         let query_embedding = self.embed_batch(vec![query.to_string()]).await?;
@@ -1009,7 +1253,7 @@ impl RagCore {
             });
         }
 
-        // Hybrid path: over-fetch dense, merge keyword scroll candidates, fuse.
+        // Hybrid path: over-fetch dense, merge keyword candidates, fuse.
         let alpha = opts
             .hybrid_alpha
             .unwrap_or(crate::hybrid::DEFAULT_HYBRID_ALPHA);
@@ -1028,33 +1272,10 @@ impl RagCore {
             )
             .await?;
 
-        let tokens = crate::hybrid::tokenize_for_keyword(query);
-        let mut keyword_candidates: Vec<SearchResult> = Vec::new();
-        if !tokens.is_empty()
-            && let Ok(payloads) = self
-                .qdrant
-                .scroll_payloads(collection, filter, crate::constants::KEYWORD_SCROLL_PAGE)
-                .await
-        {
-            for payload in payloads {
-                let text = payload
-                    .get(payload_schema::TEXT)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if text.is_empty() {
-                    continue;
-                }
-                let kw = crate::hybrid::keyword_score(&text, &tokens);
-                if kw > 0.0 {
-                    keyword_candidates.push(SearchResult {
-                        text,
-                        score: 0.0,
-                        payload,
-                    });
-                }
-            }
-        }
+        let tokens = tokenize_for_keyword(query);
+        let keyword_candidates = self
+            .hybrid_keyword_candidates(collection, query, &tokens, filter)
+            .await;
 
         let mut fused = crate::hybrid::merge_and_fuse_hybrid(
             &dense_pool,
@@ -1092,11 +1313,148 @@ impl RagCore {
         })
     }
 
+    /// Collect keyword candidates for hybrid fusion according to configured backend.
+    ///
+    /// Never fails the search: sparse schema mismatch falls back to keyword_index
+    /// then scroll; empty tokens yield no candidates.
+    async fn hybrid_keyword_candidates(
+        &self,
+        collection: &str,
+        query: &str,
+        tokens: &[String],
+        filter: Option<Filter>,
+    ) -> Vec<SearchResult> {
+        if tokens.is_empty() {
+            return Vec::new();
+        }
+
+        match self.hybrid_keyword_backend {
+            HybridKeywordBackend::Sparse => {
+                match self
+                    .keyword_candidates_sparse(collection, query, filter.clone())
+                    .await
+                {
+                    Ok(cands) if !cands.is_empty() => cands,
+                    Ok(_) => {
+                        log::debug!(
+                            "sparse hybrid returned no candidates; trying keyword_index fallback"
+                        );
+                        self.keyword_candidates_text_index(collection, tokens, filter)
+                            .await
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "sparse hybrid candidate search failed ({e}); falling back to keyword_index"
+                        );
+                        self.keyword_candidates_text_index(collection, tokens, filter)
+                            .await
+                    }
+                }
+            }
+            HybridKeywordBackend::KeywordIndex => {
+                self.keyword_candidates_text_index(collection, tokens, filter)
+                    .await
+            }
+            HybridKeywordBackend::Scroll => {
+                self.keyword_candidates_scroll(collection, tokens, filter)
+                    .await
+            }
+        }
+    }
+
+    async fn keyword_candidates_sparse(
+        &self,
+        collection: &str,
+        query: &str,
+        filter: Option<Filter>,
+    ) -> Result<Vec<SearchResult>, LqmError> {
+        let enc = encode_sparse_tf(query);
+        if enc.is_empty() {
+            return Ok(vec![]);
+        }
+        let limit = crate::constants::KEYWORD_CANDIDATE_LIMIT;
+        let mut results = self
+            .qdrant
+            .search_sparse(collection, enc.indices, enc.values, limit, filter)
+            .await?;
+        // Dense component for fusion is 0; text keyword_score drives re-rank.
+        for r in &mut results {
+            r.score = 0.0;
+        }
+        Ok(results)
+    }
+
+    async fn keyword_candidates_text_index(
+        &self,
+        collection: &str,
+        tokens: &[String],
+        base_filter: Option<Filter>,
+    ) -> Vec<SearchResult> {
+        let text_q = text_index_query(tokens);
+        if text_q.is_empty() {
+            return Vec::new();
+        }
+        let text_cond = Condition::matches_text_any(payload_schema::TEXT, text_q);
+        let filter = and_filter(base_filter.clone(), Filter::must([text_cond]));
+        match self
+            .qdrant
+            .scroll_payloads(
+                collection,
+                filter,
+                crate::constants::KEYWORD_SCROLL_PAGE.min(
+                    crate::constants::KEYWORD_CANDIDATE_LIMIT
+                        .try_into()
+                        .unwrap_or(u32::MAX),
+                ),
+            )
+            .await
+        {
+            Ok(payloads) => {
+                let mut cands = keyword_candidates_from_payloads(payloads, tokens);
+                cands.truncate(crate::constants::KEYWORD_CANDIDATE_LIMIT as usize);
+                cands
+            }
+            Err(e) => {
+                log::warn!(
+                    "keyword_index scroll failed ({e}); falling back to full collection scroll"
+                );
+                self.keyword_candidates_scroll(collection, tokens, base_filter)
+                    .await
+            }
+        }
+    }
+
+    async fn keyword_candidates_scroll(
+        &self,
+        collection: &str,
+        tokens: &[String],
+        filter: Option<Filter>,
+    ) -> Vec<SearchResult> {
+        match self
+            .qdrant
+            .scroll_payloads(collection, filter, crate::constants::KEYWORD_SCROLL_PAGE)
+            .await
+        {
+            Ok(payloads) => {
+                let mut cands = keyword_candidates_from_payloads(payloads, tokens);
+                cands.truncate(crate::constants::KEYWORD_CANDIDATE_LIMIT as usize);
+                cands
+            }
+            Err(e) => {
+                log::warn!("keyword scroll failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
     pub async fn list_collections(&self) -> Result<Vec<String>, LqmError> {
         Ok(self.qdrant.list_collections().await?)
     }
 
     /// Ensure a collection exists. When `vector_dim` is `None`, uses the active embedder dimension.
+    ///
+    /// New collections get a sparse vector schema when
+    /// [`HybridKeywordBackend::needs_sparse_schema`] is true for the configured backend.
     pub async fn ensure_collection(
         &self,
         name: &str,
@@ -1107,8 +1465,16 @@ impl RagCore {
         if exists {
             log::debug!("collection '{}' already exists", name);
         } else {
-            log::info!("creating collection '{}' (dim={})", name, dim);
-            self.qdrant.create_collection(name, dim as u64).await?;
+            let with_sparse = self.hybrid_keyword_backend.needs_sparse_schema();
+            log::info!(
+                "creating collection '{}' (dim={}, sparse={})",
+                name,
+                dim,
+                with_sparse
+            );
+            self.qdrant
+                .create_collection_with_sparse(name, dim as u64, with_sparse)
+                .await?;
         }
 
         if self.auto_index {
@@ -1126,7 +1492,38 @@ impl RagCore {
                 .await
                 .map_err(LqmError::Qdrant)?;
         }
+        // Text index enables keyword_index hybrid without full-collection scroll.
+        // Harmless for scroll backend; sparse still benefits if it falls back.
+        if self.hybrid_keyword_backend.needs_text_index()
+            || matches!(self.hybrid_keyword_backend, HybridKeywordBackend::Sparse)
+        {
+            log::debug!(
+                "creating text index on {}.{}",
+                collection,
+                payload_schema::TEXT
+            );
+            self.qdrant
+                .create_text_field_index(collection, payload_schema::TEXT)
+                .await
+                .map_err(LqmError::Qdrant)?;
+        }
         Ok(())
+    }
+}
+
+/// Combine two optional filters with AND semantics on `must`/`should`/`must_not`.
+fn and_filter(a: Option<Filter>, b: Filter) -> Option<Filter> {
+    match a {
+        None => Some(b),
+        Some(mut base) => {
+            base.must.extend(b.must);
+            base.should.extend(b.should);
+            base.must_not.extend(b.must_not);
+            if base.min_should.is_none() {
+                base.min_should = b.min_should;
+            }
+            Some(base)
+        }
     }
 }
 
@@ -1719,5 +2116,94 @@ mod tests {
                 eprintln!("Qdrant operation skipped (likely not running): {:?}", e);
             }
         }
+    }
+
+    /// Rare-token hybrid recall for a given keyword backend (skips if Qdrant down).
+    async fn hybrid_rare_token_smoke(backend: HybridKeywordBackend, coll: &str) {
+        let core = make_fake_core(2).with_hybrid_keyword_backend(backend);
+        let _ = core.delete_collection(coll).await;
+        match core.create_collection(coll, None).await {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Qdrant hybrid smoke skipped for {backend} (likely not running): {e:?}");
+                return;
+            }
+        }
+
+        let rare = "rarekeytokenxqzv9f3a";
+        let chunks = vec![
+            DocumentChunk::simple(
+                "Fluffy clouds drift over the quiet mountain lake at dawn.",
+                Some("smoke://hybrid-generic".into()),
+                Some("text".into()),
+                Some(coll.into()),
+            ),
+            DocumentChunk::simple(
+                format!(
+                    "Agent notes about Liberado retrieval and the token {rare} for hybrid smoke."
+                ),
+                Some("smoke://hybrid-keyword".into()),
+                Some("text".into()),
+                Some(coll.into()),
+            ),
+        ];
+        core.embed_and_upsert_batch(chunks)
+            .await
+            .expect("ingest hybrid smoke docs");
+
+        let page = core
+            .search_page(
+                rare,
+                SearchOptions {
+                    collection: Some(coll.into()),
+                    limit: Some(5),
+                    hybrid: true,
+                    hybrid_alpha: Some(0.35),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("hybrid search");
+        assert!(!page.results.is_empty(), "hybrid ({backend}) expected hits");
+        let joined: String = page
+            .results
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            joined.contains(rare),
+            "hybrid ({backend}) must surface rare token; got: {joined}"
+        );
+        let _ = core.delete_collection(coll).await;
+    }
+
+    #[tokio::test]
+    async fn test_hybrid_keyword_index_live_smoke() {
+        hybrid_rare_token_smoke(
+            HybridKeywordBackend::KeywordIndex,
+            "lqm_core_hybrid_kw_index",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_hybrid_sparse_live_smoke() {
+        hybrid_rare_token_smoke(HybridKeywordBackend::Sparse, "lqm_core_hybrid_sparse").await;
+    }
+
+    #[tokio::test]
+    async fn test_hybrid_scroll_live_smoke() {
+        hybrid_rare_token_smoke(HybridKeywordBackend::Scroll, "lqm_core_hybrid_scroll").await;
+    }
+
+    #[test]
+    fn test_hybrid_keyword_backend_default_is_keyword_index() {
+        // Default on RagCore::new is KeywordIndex (scalable, no recreate required).
+        let core = make_fake_core(1);
+        assert_eq!(
+            core.hybrid_keyword_backend(),
+            HybridKeywordBackend::KeywordIndex
+        );
     }
 }

@@ -34,6 +34,9 @@ lqm-mcp serve        → streamable HTTP (persistent, single model in RAM)
 | `delete_collection` | Drop |
 | `get_collection_info` | Points, vector size, distance, status |
 | `list_sources` | Distinct sources + counts |
+| `list_chunks` | Chunks for one source ordered by `chunk_index` (paginated) |
+| `get_source` | Full source reconstruction (ordered chunks + joined text) |
+| `expand_context` | ±N neighbor chunks of same source around `chunk_index` |
 | `delete_by_source` | Remove one source |
 | `delete_by_filter` | source / source_type / project / tags / scope / clearance |
 | `get_embedder_info` | id, dimension, model |
@@ -42,11 +45,17 @@ lqm-mcp serve        → streamable HTTP (persistent, single model in RAM)
 Ingest tools return `{ inserted, skipped, replaced, chunks }` (+ `file_results` where multi-item).
 
 Optional ingest fields: `scope`, `clearance`. Search/context: `scope`, `max_clearance`, `hybrid`, `hybrid_alpha`.
+Keyword backend is process config (`LQM_HYBRID_KEYWORD_BACKEND`), not a tool arg.
 
 All tools stay thin: parse args → `RagCore` / `lqm-ingest`.
 
 ## Testing
 
+- **Offline MCP harness** (always runs in CI): `turbomcp::testing::McpTestClient`
+  wraps `LqmServer` built with `FakeEmbedder` + `QdrantClient::new_lazy` (no
+  connectivity probe). Covers tool registration (`list_tools`) and a subset of
+  dispatch paths that do not need Qdrant I/O (`get_embedder_info`, validation
+  errors, unknown tool). Filter: `cargo test -p lqm-mcp offline_mcp`.
 - **Live smokes** against real Qdrant when available (`LQM_LIVE=1` hard-requires).
-- Workspace CI skips when Qdrant is down; optional `live-qdrant` job runs smokes.
-- Channel transport + `McpTestClient` offline suite is **planned** (see ROADMAP / AUDIT TC11), not yet the primary harness.
+- Workspace CI skips live cases when Qdrant is down; optional `live-qdrant` job
+  runs smokes.

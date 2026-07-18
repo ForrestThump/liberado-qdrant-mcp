@@ -3,6 +3,39 @@
 Lightweight **headless RAG** for LLM agents: Qdrant vectors, pluggable embedders,
 MCP tools (`lqm-mcp`) and HTTP API (`lqm-api`).
 
+Built to replace AnythingLLM’s **knowledge / retrieval** layer for agents—not
+chat UI, multi-user product shell, or agent orchestration. Rough coverage of
+that headless path: ~**80–85%** (see [gap map](liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md)).
+
+## Capabilities (shipped)
+
+| Area | What agents get |
+|------|-----------------|
+| Collections | create / list / info / delete |
+| Ingest | text, path, URL, batch (`ingest_many`); structure-aware chunking; skip/replace by content hash |
+| Lifecycle | `list_sources`, `delete_by_source`, `delete_by_filter` |
+| Source reconstruction | `list_chunks` / `get_source` (ordered by `chunk_index`, paginated), `expand_context` (±N neighbors) |
+| Retrieval | filtered search, pagination, `get_relevant_context`, optional hybrid (keyword_index / sparse / scroll backends) + MMR |
+| Memories | `store_memory` / `recall_memories` with optional recency blend |
+| Isolation | payload `scope` + `clearance` / `max_clearance` (not multi-user auth) |
+| Surfaces | MCP (stdio + `serve`) ↔ HTTP parity; CLI for ops |
+
+Full tool matrix and payload keys: **[docs/AGENTS.md](docs/AGENTS.md)**.
+
+## Storage model
+
+Qdrant points hold **dense vectors + payload**, not a media vault.
+
+- **Stored:** chunk **text**, metadata (`source`, `source_type`, tags, chunk
+  indices, scope/clearance, …), and the embedding.
+- **`source` is a pointer** (file path, URL, or id). Originals stay where they
+  already live; agents open them with other MCPs if needed.
+- **Not stored:** PDF/audio/image **binaries**. PDF/audio ingest keep extracted
+  or **transcribed text** only (DeepInfra Whisper/Nemotron ASR; optional
+  `audio_placeholder` when ASR key is missing and fallback is enabled).
+
+Search / context return **readable passages + citations**, not raw vectors.
+
 ## Quick start
 
 ```bash
@@ -66,11 +99,12 @@ See **[docs/AGENTS.md](docs/AGENTS.md)** for:
 
 | Doc | Contents |
 |-----|----------|
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Shipped phases P0–P5 + backlog |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | **Next** work only (forward-looking sequence) |
 | [docs/PLAN.md](docs/PLAN.md) | Design rationale |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Crate graph, data flows, scaling |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Crate graph, data flows, storage model, scaling |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | Architectural decision log |
 | [docs/AUDIT.md](docs/AUDIT.md) | Maintainability audit dispositions |
-| [AnythingLLM comparison](liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md) | Gaps vs AnythingLLM knowledge/MCP layer (~80–85% headless path) |
+| [AnythingLLM comparison](liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md) | Capability matrix vs AnythingLLM knowledge/MCP layer |
 
 ### Ingest parity
 

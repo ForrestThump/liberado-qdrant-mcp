@@ -17,8 +17,8 @@ path = "src/main.rs"
 # two backends have nothing to talk to. openai/ollama stay available as opt-in features for anyone
 # who does have an endpoint.
 lqm-core = { path = "../lqm-core", features = ["embed-fastembed"] }
-# `pdf` on by default for agent path/file ingest of documentation PDFs.
-lqm-ingest = { path = "../lqm-ingest", features = ["pdf"] }
+# `pdf` + DeepInfra ASR on by default for agent path/file ingest.
+lqm-ingest = { path = "../lqm-ingest", features = ["pdf", "asr-deepinfra"] }
 walkdir = { workspace = true }
 # Fleet standard: the ForrestThump fork pinned by rev — same pin as every other liberado-*-mcp.
 # crates.io "3" floats and predates two HTTP fixes the fork carries (notably the POST-response SSE

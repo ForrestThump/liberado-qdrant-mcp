@@ -178,23 +178,34 @@ plus optional importance/recency re-rank; no server-side LLM generation.
 touch-on-recall writes, or hybrid sparse+dense over memories only.
 
 ---
-## 012 — Hybrid search via post-query dense+keyword fusion (not native sparse)
+## 012 — Hybrid search with selectable keyword backends (sparse + text index + scroll)
 
-**Date:** 2026-07-18
+**Date:** 2026-07-18 (updated same day for scalable backends)
 
 **What:** Hybrid retrieval is an optional flag on `search_page` / MCP `search` /
-HTTP `/api/search`. It over-fetches dense hits, optionally merges keyword-
-matching scroll candidates, and fuses scores with weighted normalized dense+
-keyword signals plus reciprocal rank fusion (RRF). No Qdrant sparse vector
-schema or second index.
+HTTP `/api/search` (`hybrid` / `hybrid_alpha` unchanged). It over-fetches dense
+hits, merges keyword candidates, and fuses with weighted normalized dense+
+keyword signals plus RRF. Keyword candidates come from a **configurable
+backend** (`LQM_HYBRID_KEYWORD_BACKEND` / `RagConfig.hybrid_keyword_backend`):
+
+| Value | Behavior |
+|-------|----------|
+| `keyword_index` (default) | Payload full-text index on `text` + `MatchTextAny` filtered scroll |
+| `sparse` | Native Qdrant sparse vector (named `sparse`); TF encode at ingest/query |
+| `scroll` | Legacy full-collection payload scroll (A/B / tiny corpora) |
+
+Dense-only remains the default when `hybrid` is omitted/false. New collections
+under `sparse` get sparse schema; dense-only collections fall back safely if
+sparse search fails.
 
 **Why:**
-- Ships keyword rescue for rare tokens without collection migrations.
-- Fusion helpers are pure and unit-tested offline (CI without Qdrant).
-- Dense-only default keeps existing agents/tests stable.
+- Operators/models can A/B which keyword path works best without code changes.
+- `keyword_index` scales without recreating existing dense collections.
+- `sparse` offers ANN lexical retrieval for large corpora after create+reingest.
+- Fusion helpers stay pure and unit-tested offline.
 
-**Revisit if:** collections grow large enough that scroll candidate scans hurt
-latency, or agents need true sparse BM25 indexes in Qdrant.
+**Revisit if:** true BM25 / learned sparse models, or multi-vector product ranking
+is required beyond hash-TF sparse.
 
 ---
 ## 013 — Scoped filtering via payload scope + clearance (not multi-user auth)
@@ -207,7 +218,7 @@ accept `scope` and `max_clearance`. Upsert defaults missing clearance to
 `public`. Unscoped paths remain the default.
 
 **Why:**
-- ROADMAP "clearance-safe scoped filtering" without inventing user accounts.
+- Isolation without multi-user accounts via payload scope/clearance.
 - Keyword indexes on `scope`/`clearance` reuse existing Qdrant filter patterns.
 - Pure helpers unit-test inclusion/exclusion offline.
 
@@ -247,5 +258,83 @@ and applies `RagConfig::default()`.
 - Eliminated triple-copy construction in MCP/CLI/API (audit DP1).
 - Centralizes `QDRANT_URL` / default URL resolution.
 - Explicit CLI/API flags still override URL when provided.
+
+---
+
+## 016 — Pointer-only provenance (no media blob store)
+
+**Date:** 2026-07-18
+
+**What:** Ingest extracts text, chunks it, embeds it, and stores **text +
+metadata + vector** in Qdrant. The `source` field is a **pointer** (path, URL,
+or id). lqm does **not** copy original PDFs, audio, images, or other binaries
+into Qdrant or a side object store.
+
+**Why:**
+- Goal is headless agent knowledge retrieval, not a document management product.
+- Agents already have (or can have) filesystem / browser / other MCPs to open
+  originals when the pointer is still valid.
+- Avoids duplication, retention, and size costs of blob storage in the RAG
+  path; PDF already lands as extracted text only.
+
+**Implications:**
+- Search / `get_relevant_context` return readable chunk text and citations, not
+  raw embeddings alone.
+- Reconstructing a full parent document from the index means assembling chunks
+  by `source` + `chunk_index` (roadmap: source reconstruction tools), not
+  rehydrating the original file from lqm.
+
+**Revisit if:** agents need offline access to originals after the path/URL is
+gone, or multi-tenant document ACLs require content housed inside the service.
+
+---
+
+## 017 — Audio via DeepInfra STT (Whisper + Nemotron), not multimodal embeddings
+
+**Date:** 2026-07-18
+
+**What:** Audio file ingest (MCP/API/CLI `extract_file_async`) transcribes via
+DeepInfra multipart inference, then stores **transcript text** + path `source`
+pointer with `source_type=audio`. Configurable backends:
+
+| `LQM_ASR_BACKEND` | Default model slug |
+|-------------------|--------------------|
+| `whisper` (default) | `openai/whisper-large-v3-turbo` |
+| `nemotron` | `nvidia/Nemotron-3.5-ASR-Streaming-Multilingual-0.6b` |
+
+Optional `LQM_ASR_MODEL` overrides the slug. API key: `DEEPINFRA_API_KEY` or
+`DEEPINFRA_TOKEN`. Feature `asr-deepinfra` on `lqm-ingest` (enabled by MCP/API/CLI).
+Without key: fail closed unless `LQM_ASR_FALLBACK_PLACEHOLDER=1`. Sync extract
+still yields `audio_placeholder` for non-async callers / feature-off builds.
+**No streaming mic input; no audio vectors.**
+
+**Why:**
+- Same text RAG path as PDF (hybrid, reconstruction, memories).
+- Dual backends A/B on one HTTP contract (slug only differs).
+- Avoid multimodal embedding indexes that agents cannot read as citations.
+
+**Revisit if:** offline local ASR (whisper-rs) is required, or true streaming
+sessions become an agent need.
+
+---
+
+## 018 — Offline MCP tests via McpTestClient (not full Qdrant mock)
+
+**Date:** 2026-07-18
+
+**What:** `lqm-mcp` ships offline integration tests that wrap the real
+`#[server]` `LqmServer` in turbomcp’s `McpTestClient`, with `FakeEmbedder` and
+`QdrantClient::new_lazy` (no list_collections health probe). They assert tool
+registration and offline-safe tool dispatch. Live Qdrant smokes remain for
+ingest/search/lifecycle.
+
+**Why:**
+- Hermetic CI coverage of the MCP surface without requiring Qdrant.
+- Exercises real macro-generated handler dispatch (not only inherent methods).
+- Full in-memory Qdrant double would need a large `RagCore` seam; deferred to
+  optional later work.
+
+**Revisit if:** offline ingest/search becomes mandatory for CI or a thin Qdrant
+trait appears for other reasons.
 
 ---

@@ -14,6 +14,7 @@ pub mod hybrid;
 pub mod lifecycle;
 pub mod memory;
 pub mod qdrant;
+pub mod reconstruction;
 pub mod scope;
 pub mod source_type;
 pub mod types;
@@ -28,9 +29,12 @@ pub use context::{
     ContextSource, FormattedContext, format_relevant_context, format_relevant_context_with,
     mmr_rerank,
 };
+pub use embedding::FakeEmbedder;
 pub use hybrid::{
-    DEFAULT_HYBRID_ALPHA, DEFAULT_RRF_K, fuse_dense_keyword, hybrid_dense_fetch_limit,
-    keyword_score, merge_and_fuse_hybrid, tokenize_for_keyword,
+    DEFAULT_HYBRID_ALPHA, DEFAULT_RRF_K, HybridKeywordBackend, SparseEncoding, encode_sparse_tf,
+    fuse_dense_keyword, hash_token, hybrid_dense_fetch_limit, hybrid_keyword_backend_from_env,
+    keyword_candidates_from_payloads, keyword_score, merge_and_fuse_hybrid, text_index_query,
+    tokenize_for_keyword,
 };
 pub use lifecycle::decide_source_reingest;
 pub use memory::{
@@ -40,6 +44,11 @@ pub use memory::{
 pub use qdrant::QdrantClient;
 pub use qdrant::RagCore;
 pub use qdrant::build_point_payload;
+pub use reconstruction::{
+    DEFAULT_EXPAND_NEIGHBORS, DEFAULT_LIST_CHUNKS_LIMIT, SourceChunk, SourceChunkPage,
+    SourceDocument, expand_chunk_neighbors, paginate_source_chunks, parse_chunk_index_value,
+    sort_source_chunks, source_chunk_from_payload, source_document_from_chunks,
+};
 pub use scope::{
     CLEARANCE_LEVELS, DEFAULT_CLEARANCE, allowed_clearance_levels, clearance_allowed,
     clearance_rank, normalize_clearance, point_in_scope, scope_matches,
