@@ -23,13 +23,15 @@ src/
 ├── config.rs    — EmbedderConfig TOML/env, create_embedder()
 ├── context.rs   — format_relevant_context(_with), mmr_rerank
 ├── lifecycle.rs — decide_source_reingest (pure skip/replace/insert)
+├── reconstruction.rs — list/sort/paginate/expand source chunks (pure)
 ├── memory.rs    — MemoryNote/Hit, blend ranking, DEFAULT_MEMORY_COLLECTION
 ├── hybrid.rs    — keyword_score, RRF + weighted fuse (pure)
 ├── scope.rs     — scope match + clearance ranks
 ├── source_type.rs — SourceType enum (canonical as_str literals)
 ├── constants.rs — defaults (chunk size, search limits, SOURCE_TYPE_* mirrors)
 ├── embedding.rs — Embedder trait, Fake/FastEmbed/Ollama/OpenAI, parse_*_embeddings
-└── qdrant.rs    — QdrantClient, RagCore (from_env, expand_to_chunks, search_page, lifecycle I/O)
+└── qdrant.rs    — QdrantClient, RagCore (from_env, expand_to_chunks, search_page,
+                   list_chunks / get_source / expand_context, lifecycle I/O)
 ```
 
 ## Key design decisions
@@ -44,5 +46,7 @@ src/
 - `search_page` + hybrid optional (`scroll_payloads` is O(n); see workspace ARCHITECTURE scaling)
 - Memories: collection `memories`, `source_type=memory`, optional recency blend
 - Scoped filtering: `scope` exact + `clearance` ordinal / `max_clearance`
+- Source reconstruction: `list_chunks` / `get_source` / `expand_context` (order by
+  `chunk_index`; missing index last; pointer-only provenance)
 - Embedders feature-gated: `embed-fastembed`, `embed-ollama`, `embed-openai`
 - `DEFAULT_COLLECTION_NAME = "default"` via `resolve_collection`

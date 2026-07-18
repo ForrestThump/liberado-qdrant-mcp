@@ -20,10 +20,13 @@ for all RAG logic; stays in parity with MCP tools (see `docs/AGENTS.md` matrix).
 | `GET` | `/api/collections/{name}` | info |
 | `DELETE` | `/api/collections/{name}` | delete |
 | `GET` | `/api/collections/{name}/sources` | list_sources |
+| `GET` | `/api/collections/{name}/sources/{source}` | get_source |
+| `GET` | `/api/collections/{name}/sources/{source}/chunks` | list_chunks (`offset`/`limit` query) |
 | `DELETE` | `/api/collections/{name}/sources/{source}` | delete_by_source |
 | `POST` | `/api/collections/{name}/delete_by_filter` | filter delete |
 | `POST` | `/api/search` | filters, hybrid, pagination |
 | `POST` | `/api/context` | get_relevant_context |
+| `POST` | `/api/expand_context` | neighbor window for source + chunk_index |
 | `POST` | `/api/ingest` | text; **structure-aware chunking** |
 | `POST` | `/api/ingest/path` | file/dir |
 | `POST` | `/api/ingest/url` | remote URL |

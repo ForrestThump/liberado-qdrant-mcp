@@ -34,6 +34,9 @@ lqm-mcp serve        → streamable HTTP (persistent, single model in RAM)
 | `delete_collection` | Drop |
 | `get_collection_info` | Points, vector size, distance, status |
 | `list_sources` | Distinct sources + counts |
+| `list_chunks` | Chunks for one source ordered by `chunk_index` (paginated) |
+| `get_source` | Full source reconstruction (ordered chunks + joined text) |
+| `expand_context` | ±N neighbor chunks of same source around `chunk_index` |
 | `delete_by_source` | Remove one source |
 | `delete_by_filter` | source / source_type / project / tags / scope / clearance |
 | `get_embedder_info` | id, dimension, model |
@@ -49,4 +52,4 @@ All tools stay thin: parse args → `RagCore` / `lqm-ingest`.
 
 - **Live smokes** against real Qdrant when available (`LQM_LIVE=1` hard-requires).
 - Workspace CI skips when Qdrant is down; optional `live-qdrant` job runs smokes.
-- Channel transport + `McpTestClient` offline suite is **planned** (see `docs/ROADMAP.md` item 4 / AUDIT TC11), not yet the primary harness.
+- Channel transport + `McpTestClient` offline suite is **planned** (see `docs/ROADMAP.md` item 3 / AUDIT TC11), not yet the primary harness.

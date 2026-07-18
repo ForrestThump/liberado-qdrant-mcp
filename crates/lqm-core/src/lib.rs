@@ -14,6 +14,7 @@ pub mod hybrid;
 pub mod lifecycle;
 pub mod memory;
 pub mod qdrant;
+pub mod reconstruction;
 pub mod scope;
 pub mod source_type;
 pub mod types;
@@ -40,6 +41,11 @@ pub use memory::{
 pub use qdrant::QdrantClient;
 pub use qdrant::RagCore;
 pub use qdrant::build_point_payload;
+pub use reconstruction::{
+    DEFAULT_EXPAND_NEIGHBORS, DEFAULT_LIST_CHUNKS_LIMIT, SourceChunk, SourceChunkPage,
+    SourceDocument, expand_chunk_neighbors, paginate_source_chunks, parse_chunk_index_value,
+    sort_source_chunks, source_chunk_from_payload, source_document_from_chunks,
+};
 pub use scope::{
     CLEARANCE_LEVELS, DEFAULT_CLEARANCE, allowed_clearance_levels, clearance_allowed,
     clearance_rank, normalize_clearance, point_in_scope, scope_matches,

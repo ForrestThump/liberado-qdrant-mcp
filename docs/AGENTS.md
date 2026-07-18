@@ -16,6 +16,8 @@ Headless RAG for LLM agents: **Qdrant + embeddings + MCP/HTTP**. No chat UI.
 | Add a webpage | `ingest_url` | — |
 | Batch many items | `ingest_many` | N sequential single-item tools when possible |
 | See what is already indexed | `list_sources` | — |
+| Read all chunks of one source in order | `get_source` / `list_chunks` | Re-running `search` and guessing filters |
+| Expand a hit with neighboring chunks | `expand_context` (same `source` + `chunk_index` ±N) | Inventing text outside the index |
 | Remove one document | `delete_by_source` | `delete_collection` (wipes everything) |
 | Create a scoped KB | `create_collection` | — |
 | Check embedder dim/model | `get_embedder_info` | Guessing dims from docs alone |
@@ -45,6 +47,9 @@ Headless RAG for LLM agents: **Qdrant + embeddings + MCP/HTTP**. No chat UI.
 | `get_collection_info` | `GET /api/collections/{name}` |
 | `delete_collection` | `DELETE /api/collections/{name}` |
 | `list_sources` | `GET /api/collections/{name}/sources` |
+| `list_chunks` | `GET /api/collections/{name}/sources/{source}/chunks?offset=&limit=` |
+| `get_source` | `GET /api/collections/{name}/sources/{source}` |
+| `expand_context` | `POST /api/expand_context` `{ "source", "chunk_index", "neighbors"?, "collection"? }` |
 | `delete_by_source` | `DELETE /api/collections/{name}/sources/{source}` |
 | `delete_by_filter` | `POST /api/collections/{name}/delete_by_filter` |
 | `get_embedder_info` | `GET /api/embedder` |
@@ -111,6 +116,12 @@ Qdrant stores **chunk text + metadata + vectors**. `source` is a **pointer**
 `get_relevant_context` return **passages and citations**, not raw embeddings.
 Original binaries are not in lqm—use other MCPs with `source` if you need the
 file itself. See `docs/ARCHITECTURE.md` and decision **016**.
+
+**Source reconstruction:** after a hit, call `list_chunks` / `get_source` with
+that `source` to read indexed chunks **ordered by `chunk_index`** (paginated via
+`offset`/`limit`/`has_more`/`next_offset`). Use `expand_context` for ±N neighbors
+of the same source around a `chunk_index`. Missing `chunk_index` sorts last.
+This rebuilds text from the index only — not original files.
 
 ## Stable payload schema (Qdrant points)
 

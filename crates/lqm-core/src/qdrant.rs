@@ -875,6 +875,90 @@ impl RagCore {
             .await
     }
 
+    /// Fetch all payload points for a source (unordered scroll).
+    async fn payloads_for_source(
+        &self,
+        collection: &str,
+        source: &str,
+    ) -> Result<Vec<crate::types::Payload>, LqmError> {
+        if source.trim().is_empty() {
+            return Err(LqmError::Validation(
+                "source must not be empty for source reconstruction".to_string(),
+            ));
+        }
+        if !self.qdrant.collection_exists(collection).await? {
+            return Ok(vec![]);
+        }
+        let filter = payload_filter_to_qdrant(&PayloadFilter::for_source(source));
+        Ok(self
+            .qdrant
+            .scroll_payloads(collection, filter, crate::constants::SCROLL_PAGE_SIZE)
+            .await?)
+    }
+
+    /// List chunks for a source ordered by `chunk_index` with pagination.
+    ///
+    /// Missing `chunk_index` sorts last. `limit=0` returns an empty page (same
+    /// as search). Default limit is [`crate::reconstruction::DEFAULT_LIST_CHUNKS_LIMIT`].
+    pub async fn list_chunks(
+        &self,
+        collection: &str,
+        source: &str,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<crate::reconstruction::SourceChunkPage, LqmError> {
+        let payloads = self.payloads_for_source(collection, source).await?;
+        let chunks: Vec<_> = payloads
+            .into_iter()
+            .map(crate::reconstruction::source_chunk_from_payload)
+            .collect();
+        let offset = offset.unwrap_or(0);
+        let limit = limit.unwrap_or(crate::reconstruction::DEFAULT_LIST_CHUNKS_LIMIT);
+        Ok(crate::reconstruction::paginate_source_chunks(
+            chunks, source, offset, limit,
+        ))
+    }
+
+    /// Reconstruct a full source: all chunks ordered + joined text.
+    pub async fn get_source(
+        &self,
+        collection: &str,
+        source: &str,
+    ) -> Result<crate::reconstruction::SourceDocument, LqmError> {
+        let payloads = self.payloads_for_source(collection, source).await?;
+        let chunks: Vec<_> = payloads
+            .into_iter()
+            .map(crate::reconstruction::source_chunk_from_payload)
+            .collect();
+        Ok(crate::reconstruction::source_document_from_chunks(
+            source, chunks,
+        ))
+    }
+
+    /// Neighboring chunks of the same source around `chunk_index` (±`neighbors`).
+    ///
+    /// Default neighbors is [`crate::reconstruction::DEFAULT_EXPAND_NEIGHBORS`].
+    /// Only indexed chunks already stored for that source are returned.
+    pub async fn expand_context(
+        &self,
+        collection: &str,
+        source: &str,
+        chunk_index: u64,
+        neighbors: Option<u64>,
+    ) -> Result<Vec<crate::reconstruction::SourceChunk>, LqmError> {
+        let payloads = self.payloads_for_source(collection, source).await?;
+        let chunks: Vec<_> = payloads
+            .into_iter()
+            .map(crate::reconstruction::source_chunk_from_payload)
+            .collect();
+        let neighbors = neighbors.unwrap_or(crate::reconstruction::DEFAULT_EXPAND_NEIGHBORS);
+        Ok(crate::reconstruction::expand_chunk_neighbors(
+            &chunks,
+            chunk_index,
+            neighbors,
+        ))
+    }
+
     pub async fn delete_by_filter(
         &self,
         collection: &str,

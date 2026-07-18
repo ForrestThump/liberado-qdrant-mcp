@@ -71,6 +71,24 @@ original media (if still available) is the job of other host tools/MCPs using
 `source` as a handle. PDF ingest stores extracted text only; audio currently
 stores a filterable placeholder until transcription ships.
 
+### Source reconstruction
+
+```
+collection + source
+        │
+        ▼
+  scroll payloads (filter source=…)
+        │
+        ▼
+  parse chunk_index (number or string) → sort (missing index last)
+        │
+        ├── list_chunks  → paginate (offset/limit/has_more)
+        ├── get_source   → all chunks + joined text
+        └── expand_context(center, ±N) → window of same-source chunks
+```
+
+Pure helpers live in `lqm_core::reconstruction`; MCP/HTTP are thin adapters.
+
 ### Search (dense)
 
 ```

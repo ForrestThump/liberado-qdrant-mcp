@@ -1,10 +1,10 @@
 use axum::{
     Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Json,
-    routing::{delete, get, post},
+    routing::{get, post},
 };
 use clap::Parser;
 use lqm_core::constants;
@@ -443,6 +443,84 @@ async fn list_sources(
         "status": "ok",
         "collection": name,
         "sources": sources,
+    })))
+}
+
+#[derive(Deserialize)]
+struct ListChunksQuery {
+    offset: Option<u64>,
+    limit: Option<u64>,
+}
+
+async fn list_chunks(
+    State(state): State<AppState>,
+    Path((name, source)): Path<(String, String)>,
+    Query(q): Query<ListChunksQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let page = state
+        .core
+        .list_chunks(&name, &source, q.offset, q.limit)
+        .await
+        .map_err(map_lqm_err)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "collection": name,
+        "source": page.source,
+        "chunks": page.chunks,
+        "offset": page.offset,
+        "limit": page.limit,
+        "total": page.total,
+        "has_more": page.has_more,
+        "next_offset": page.next_offset,
+    })))
+}
+
+async fn get_source(
+    State(state): State<AppState>,
+    Path((name, source)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let doc = state
+        .core
+        .get_source(&name, &source)
+        .await
+        .map_err(map_lqm_err)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "collection": name,
+        "source": doc.source,
+        "source_type": doc.source_type,
+        "total": doc.total,
+        "text": doc.text,
+        "chunks": doc.chunks,
+    })))
+}
+
+#[derive(Deserialize)]
+struct ExpandContextBody {
+    source: String,
+    chunk_index: u64,
+    collection: Option<String>,
+    neighbors: Option<u64>,
+}
+
+async fn expand_context(
+    State(state): State<AppState>,
+    Json(body): Json<ExpandContextBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let collection = resolve_collection(body.collection);
+    let chunks = state
+        .core
+        .expand_context(&collection, &body.source, body.chunk_index, body.neighbors)
+        .await
+        .map_err(map_lqm_err)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "collection": collection,
+        "source": body.source,
+        "chunk_index": body.chunk_index,
+        "neighbors": body.neighbors.unwrap_or(lqm_core::DEFAULT_EXPAND_NEIGHBORS),
+        "count": chunks.len(),
+        "chunks": chunks,
     })))
 }
 
@@ -964,7 +1042,11 @@ fn build_router(state: AppState) -> Router {
         .route("/api/collections/{name}/sources", get(list_sources))
         .route(
             "/api/collections/{name}/sources/{source}",
-            delete(delete_by_source),
+            get(get_source).delete(delete_by_source),
+        )
+        .route(
+            "/api/collections/{name}/sources/{source}/chunks",
+            get(list_chunks),
         )
         .route(
             "/api/collections/{name}/delete_by_filter",
@@ -972,6 +1054,7 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/search", post(search))
         .route("/api/context", post(get_relevant_context))
+        .route("/api/expand_context", post(expand_context))
         .route("/api/ingest", post(ingest))
         .route("/api/ingest/path", post(ingest_path))
         .route("/api/ingest/url", post(ingest_url))

@@ -14,6 +14,7 @@ that headless path: ~**80–85%** (see [gap map](liberado-qdrant-mcp_vs_Anything
 | Collections | create / list / info / delete |
 | Ingest | text, path, URL, batch (`ingest_many`); structure-aware chunking; skip/replace by content hash |
 | Lifecycle | `list_sources`, `delete_by_source`, `delete_by_filter` |
+| Source reconstruction | `list_chunks` / `get_source` (ordered by `chunk_index`, paginated), `expand_context` (±N neighbors) |
 | Retrieval | filtered search, pagination, `get_relevant_context`, optional hybrid + MMR |
 | Memories | `store_memory` / `recall_memories` with optional recency blend |
 | Isolation | payload `scope` + `clearance` / `max_clearance` (not multi-user auth) |

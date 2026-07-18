@@ -37,31 +37,9 @@ are not copied into a blob store. See ARCHITECTURE and DECISIONS.
 ## Active sequence (by leverage)
 
 Do these **in order** unless a deployment constraint forces a jump (e.g. large
-corpus already needs sparse hybrid before document-reconstruction tools).
+corpus already needs sparse hybrid before other work).
 
-### 1. Source reconstruction tools (next)
-
-**Why:** Agents can search and list sources, but cannot easily walk from a hit
-to the full ordered document text without re-searching ad hoc. Highest
-librarian-style payoff for a headless KB.
-
-**Ship:**
-
-- [ ] **`list_chunks` / `get_source`** — for a collection + `source`, return
-      chunks ordered by `chunk_index` (text + payload fields agents need for
-      citation). Paginate if large.
-- [ ] Optional **`expand_context`** — given a hit (or `source` + `chunk_index`),
-      return ±N neighboring chunks of the same source.
-- [ ] MCP + HTTP parity; live smoke; update `docs/AGENTS.md` matrix.
-
-**Done when:** after a search hit, an agent can reconstruct the parent source’s
-indexed text in order without guessing filters.
-
-**Does not include:** storing original binaries/PDFs/audio files in lqm.
-
----
-
-### 2. Sparse / scalable hybrid retrieval
+### 1. Sparse / scalable hybrid retrieval
 
 **Why:** Hybrid dense + keyword is shipped, but the keyword path **scrolls the
 full collection** (`O(n)` payloads). Fine for small/medium homelab corpora;
@@ -84,7 +62,7 @@ walks.
 
 ---
 
-### 3. Real audio transcription (only if needed)
+### 2. Real audio transcription (only if needed)
 
 **Why:** Audio paths currently emit `source_type=audio_placeholder` stubs.
 Worth doing **only if** agents ingest voice notes / podcasts into the KB.
@@ -105,7 +83,7 @@ metadata stubs.
 
 ---
 
-### 4. Offline MCP integration tests
+### 3. Offline MCP integration tests
 
 **Why:** Live smokes skip without Qdrant. PLAN called for turbomcp `channel` +
 `McpTestClient`; hermetic tool tests protect the surface as it grows.
