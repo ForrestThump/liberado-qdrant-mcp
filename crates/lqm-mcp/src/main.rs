@@ -258,6 +258,76 @@ impl LqmServer {
         }
     }
 
+    /// Fetch a remote HTTP(S) URL, extract text (HTML stripped or plain), chunk/embed/upsert.
+    ///
+    /// Source metadata defaults to the URL; `source_type` defaults to the extractor's guess
+    /// (`webpage` for HTML, `url` otherwise). Optional tags/project flow into the payload.
+    #[tool]
+    #[allow(clippy::too_many_arguments)]
+    async fn ingest_url(
+        &self,
+        url: String,
+        collection: Option<String>,
+        tags: Option<Vec<String>>,
+        source_type: Option<String>,
+        project: Option<String>,
+        source: Option<String>,
+    ) -> McpResult<Value> {
+        let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        self.ensure_collection(&collection).await?;
+
+        let fetched = lqm_ingest::fetch_url(&url, None)
+            .await
+            .map_err(|e| McpError::internal(format!("ingest_url fetch failed: {e}")))?;
+
+        let resolved_source = source.unwrap_or_else(|| fetched.url.clone());
+        let resolved_source_type = source_type.unwrap_or(fetched.source_type);
+
+        // Chunk long pages so retrieval stays passage-level, same path as local file ingest.
+        let pieces = self.core().chunk_text_method(&fetched.text);
+        let chunks: Vec<DocumentChunk> = pieces
+            .into_iter()
+            .map(|text| DocumentChunk {
+                text,
+                source: Some(resolved_source.clone()),
+                source_type: Some(resolved_source_type.clone()),
+                collection: Some(collection.clone()),
+                tags: tags.clone(),
+                timestamp: None,
+                project: project.clone(),
+                last_modified: None,
+            })
+            .collect();
+
+        if chunks.is_empty() {
+            return Err(McpError::internal(format!(
+                "ingest_url produced no chunks for {url}"
+            )));
+        }
+
+        let count = self
+            .core()
+            .embed_and_upsert_batch(chunks)
+            .await
+            .map_err(|e| McpError::internal(format!("ingest_url upsert failed: {e}")))?;
+
+        log::info!(
+            "ingested url {} ({} chunks) into '{}'",
+            url,
+            count,
+            collection
+        );
+        Ok(serde_json::json!({
+            "status": "ok",
+            "url": url,
+            "source": resolved_source,
+            "source_type": resolved_source_type,
+            "content_type": fetched.content_type,
+            "chunks": count,
+            "collection": collection,
+        }))
+    }
+
     #[tool]
     async fn ingest_path(&self, path: String, collection: Option<String>) -> McpResult<Value> {
         let core = self.core();

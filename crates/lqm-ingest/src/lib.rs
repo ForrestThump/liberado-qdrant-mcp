@@ -1,3 +1,9 @@
+mod url;
+
+pub use url::{
+    DEFAULT_FETCH_TIMEOUT_SECS, FetchedDocument, extract_response_text, fetch_url, html_to_text,
+};
+
 use lqm_core::types::DocumentChunk;
 use std::path::Path;
 use thiserror::Error;
