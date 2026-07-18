@@ -207,7 +207,7 @@ accept `scope` and `max_clearance`. Upsert defaults missing clearance to
 `public`. Unscoped paths remain the default.
 
 **Why:**
-- ROADMAP "clearance-safe scoped filtering" without inventing user accounts.
+- Isolation without multi-user accounts via payload scope/clearance.
 - Keyword indexes on `scope`/`clearance` reuse existing Qdrant filter patterns.
 - Pure helpers unit-test inclusion/exclusion offline.
 
@@ -247,5 +247,33 @@ and applies `RagConfig::default()`.
 - Eliminated triple-copy construction in MCP/CLI/API (audit DP1).
 - Centralizes `QDRANT_URL` / default URL resolution.
 - Explicit CLI/API flags still override URL when provided.
+
+---
+
+## 016 — Pointer-only provenance (no media blob store)
+
+**Date:** 2026-07-18
+
+**What:** Ingest extracts text, chunks it, embeds it, and stores **text +
+metadata + vector** in Qdrant. The `source` field is a **pointer** (path, URL,
+or id). lqm does **not** copy original PDFs, audio, images, or other binaries
+into Qdrant or a side object store.
+
+**Why:**
+- Goal is headless agent knowledge retrieval, not a document management product.
+- Agents already have (or can have) filesystem / browser / other MCPs to open
+  originals when the pointer is still valid.
+- Avoids duplication, retention, and size costs of blob storage in the RAG
+  path; PDF already lands as extracted text only.
+
+**Implications:**
+- Search / `get_relevant_context` return readable chunk text and citations, not
+  raw embeddings alone.
+- Reconstructing a full parent document from the index means assembling chunks
+  by `source` + `chunk_index` (roadmap: source reconstruction tools), not
+  rehydrating the original file from lqm.
+
+**Revisit if:** agents need offline access to originals after the path/URL is
+gone, or multi-tenant document ACLs require content housed inside the service.
 
 ---

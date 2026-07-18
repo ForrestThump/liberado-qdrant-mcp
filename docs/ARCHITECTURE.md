@@ -54,6 +54,23 @@ file / dir / text / url
 All MCP, HTTP, and CLI ingest paths call the same `expand_to_chunks` helper so
 chunk boundaries stay consistent across surfaces.
 
+### What is stored vs pointed at
+
+Each Qdrant point is `{ dense vector, payload }`. The payload includes the
+chunk **`text`** and metadata such as **`source`** (path/URL/id),
+`source_type`, `chunk_index` / `total_chunks`, tags, project, scope, clearance.
+
+| In Qdrant | Not in Qdrant |
+|-----------|----------------|
+| Chunk text (searchable / LLM-readable) | Original file/URL bytes |
+| Embedding vector | A separate blob/object store |
+| Provenance pointer (`source`) | Guaranteed live filesystem access |
+
+Agents retrieve **text + citations**, not raw vectors alone. Opening the
+original media (if still available) is the job of other host tools/MCPs using
+`source` as a handle. PDF ingest stores extracted text only; audio currently
+stores a filterable placeholder until transcription ships.
+
 ### Search (dense)
 
 ```
@@ -117,7 +134,7 @@ Homelab-friendly defaults; know these before large corpora:
 | Doc | Role |
 |-----|------|
 | [`docs/PLAN.md`](PLAN.md) | Design rationale |
-| [`docs/ROADMAP.md`](ROADMAP.md) | Shipped / backlog |
+| [`docs/ROADMAP.md`](ROADMAP.md) | Forward-looking next work only |
 | [`docs/AGENTS.md`](AGENTS.md) | Tool matrix for hosts |
 | [`docs/AUDIT.md`](AUDIT.md) | Maintainability audit + dispositions |
 | [`../liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md`](../liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md) | Gaps vs AnythingLLM knowledge layer |

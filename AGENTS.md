@@ -19,7 +19,7 @@ Shorthand: `lqm`.
 docs/
   PLAN.md          ← overall design and rationale (read first)
   ARCHITECTURE.md  ← system-level crate graph, data flow, seams
-  ROADMAP.md       ← shipped / next / backlog
+  ROADMAP.md       ← forward-looking next work only (no shipped checklist)
   DECISIONS.md     ← why we chose what we chose
   AUDIT.md         ← audit findings and fix status
   AGENTS.md        ← MCP↔HTTP tool matrix for host agents
@@ -46,7 +46,9 @@ Each crate also has its own `ARCHITECTURE.md`.
 3. **Add tests with every feature.** Unit tests in the relevant crate.
    Integration tests use turbomcp's `channel` transport + `McpTestClient`.
 4. **Keep docs in sync.** When you add a crate, create its `ARCHITECTURE.md`.
-   When you ship a milestone, update `docs/ROADMAP.md`.
+   When you ship a roadmap item: document it in README / AGENTS / ARCHITECTURE /
+   DECISIONS as appropriate, then **remove it from** `docs/ROADMAP.md` (that
+   file is forward-looking only — no shipped checklist).
 5. **Record decisions.** If you make a choice with non-obvious tradeoffs, add an
    entry to `docs/DECISIONS.md`.
 6. **Audit regularly.** Before landing a non-trivial PR, scan for:

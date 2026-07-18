@@ -47,4 +47,4 @@ lqm-api --config embedder.toml --qdrant-url http://localhost:6334
 ## Static UI
 
 `static/index.html` is an interim dark-mode search page until a Dioxus SPA
-(ROADMAP P5). Not the product goal — agents should prefer MCP/HTTP tools.
+(`docs/ROADMAP.md` later/optional). Not the product goal — agents should prefer MCP/HTTP tools.

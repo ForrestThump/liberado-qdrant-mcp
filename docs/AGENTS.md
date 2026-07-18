@@ -104,6 +104,14 @@ lqm-api --host 127.0.0.1 --port 8080
 
 Optional API auth: set `LQM_API_TOKEN=secret` then send `Authorization: Bearer secret` on all `/api/*` routes (`/health` stays open).
 
+## Storage model (what agents can read)
+
+Qdrant stores **chunk text + metadata + vectors**. `source` is a **pointer**
+(path/URL/id), not a copy of the original file. Search and
+`get_relevant_context` return **passages and citations**, not raw embeddings.
+Original binaries are not in lqm—use other MCPs with `source` if you need the
+file itself. See `docs/ARCHITECTURE.md` and decision **016**.
+
 ## Stable payload schema (Qdrant points)
 
 Written by the shared upsert path:

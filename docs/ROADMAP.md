@@ -1,243 +1,161 @@
 # Roadmap
 
-Living document. Move items from active phases into **Shipped** as they land.
-Prioritization is by **leverage** (payoff / effort) for the stated goal:
-**headless agent tooling that can replace AnythingLLM’s backend knowledge layer
-+ HTTP API + MCP** — not chat UI, multi-user product, or agent orchestration.
+**Forward-looking only.** What has already shipped lives in:
 
-**Architecture rule:** new capability → `lqm-core` first → thin MCP + API (+ CLI
-if ops-useful) in the same change. Live smoke against Qdrant for every new tool.
+| Doc | Role |
+|-----|------|
+| [`README.md`](../README.md) | Capabilities overview, quick start, storage model |
+| [`docs/AGENTS.md`](AGENTS.md) | MCP ↔ HTTP tool matrix, payload schema, host setup |
+| [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | Crate graph, data flows, scaling boundaries |
+| [`docs/DECISIONS.md`](DECISIONS.md) | Why we chose what we chose |
+| [`docs/PLAN.md`](PLAN.md) | Design rationale (historical milestones) |
+| [AnythingLLM gap map](../liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md) | Capability matrix vs AnythingLLM knowledge layer |
 
----
-
-## North star (scope reminder)
-
-| In scope | Out of scope (for now) |
-|----------|-------------------------|
-| Collections as scoped knowledge bases | Multi-user auth / multi-tenancy |
-| Ingest (text, path, URL, more formats) | Full chat UI / workspace chat history |
-| Semantic search + LLM-ready context | AnythingLLM agent CRUD / `invoke_agent` |
-| Document lifecycle (list/delete/replace) | Broad SaaS connectors (Notion, etc.) before lifecycle is solid |
-| MCP + HTTP API parity over `RagCore` | Competing on product shell |
-
-Rough progress as a **headless agent KB** (P0–P4 + hybrid/scope shipped):
-~**80–85%** of the AnythingLLM *agent knowledge/retrieval* path without product
-surface. Remaining: scale (sparse hybrid), audio transcription, offline MCP
-tests, optional SPA/connectors. See
-[`liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md`](../liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md).
+When a roadmap item lands: implement it, document it in the rows above, then
+**remove it from this file** (or move it only into historical docs if needed).
+Do not accumulate a “Shipped” checklist here.
 
 ---
 
-## Shipped
+## Goal
 
-### Foundations (M0–M8)
+Headless agent knowledge layer: **collections + ingest + lifecycle + retrieval
++ memories** over Qdrant via MCP and HTTP — enough to replace AnythingLLM’s
+backend knowledge/MCP path for agents. Not a chat UI, multi-user product, or
+agent orchestrator.
 
-- **M0 — Scaffolding** (Cargo workspace, crate skeletons, docs, AGENTS.md)
-- **M1 — Core MVP** (Embedder trait, FakeEmbedder, chunking, Qdrant wrapper, types, semaphore)
-- **M2 — MCP binary (stdio)** (turbomcp: ingest_text, search, list_collections)
-- **M3 — Dual mode** (stdio + streamable HTTP via `lqm-mcp serve`)
-- **M4 — CLI + benchmarking** (ingest/list/delete/bench, file walker, mtime)
-- **M5 — Hash + indexes** (SHA256 `ingest_hash` stored, auto payload indexes, `last_modified`)
-- **M6 — More mediums** (PDF behind `pdf` feature, audio as `audio_placeholder`, extension detection)
-- **M7 — Ollama + OpenAI embedders** (feature-gated, TOML + env, factory)
-- **M8 — HTTP API + simple UI** (axum REST, dark-mode search page)
+**Architecture rule:** new capability → `lqm-core` first → thin MCP + API
+(+ CLI if ops-useful) in the same change. Live smoke against Qdrant for every
+new tool.
 
-### Post-M8 hardening
-
-- Audit fixes, fastembed default + zero-config model, structured logging
-- `ingest_path` MCP tool; CI (fmt, clippy, test)
-- Deploy path (Dockerfile, origin policy, on-demand collection create)
-
-### Phase 1 — Agent RAG foundation (high leverage, shipped)
-
-- Collection tools: `create_collection`, `delete_collection`, `get_collection_info`
-- Remote ingest: `fetch_url` / HTML extract + `ingest_url`
-- Agent context: `format_relevant_context` + `get_relevant_context`
-- Live `test_all_mcp_tools_live_smoke` against real Qdrant
-- Search `limit=0` → empty results (Qdrant-safe)
-
-### Phase P0 — Document lifecycle + true idempotency (shipped)
-
-- **Source lifecycle (core)** — `list_sources`, `delete_by_source`, `delete_by_filter` (tags / source_type / project); scroll + count helpers
-- **Re-ingest policy** — same source + same hash multiset → skip; different → delete source then upsert; `IngestReport { inserted, skipped, replaced, chunks }`
-- **MCP** — `list_sources`, `delete_by_source`, `delete_by_filter`; ingest tools return accounting fields
-- **HTTP API** — create/info collection; list/delete sources; delete_by_filter; ingest stats
-- **Live smoke** — `test_p0_lifecycle_live_smoke` + extended `test_all_mcp_tools_live_smoke`
-- Indexes: `project` + `tags` added to auto-created keyword indexes
-
-**Done when (met):** an agent can fully manage a throwaway KB without `delete_collection`.
+**Storage model (fixed):** Qdrant holds **chunk text + metadata + vectors**.
+`source` is a **pointer** (path/URL/id) for agents and other MCPs — originals
+are not copied into a blob store. See ARCHITECTURE and DECISIONS.
 
 ---
 
-## Priority order (by leverage)
+## Active sequence (by leverage)
 
-Leverage = agent payoff ÷ implementation effort. Do **P1 before P2**, etc.
-Within a band, list order is the suggested implementation sequence.
+Do these **in order** unless a deployment constraint forces a jump (e.g. large
+corpus already needs sparse hybrid before document-reconstruction tools).
 
-| Band | Theme | Why high leverage | Status |
-|------|--------|-------------------|--------|
-| **P0** | Document lifecycle + true idempotency | Agents cannot curate KBs without list/delete/replace | **Shipped** |
-| **P1** | Richer retrieval | Better filters/pagination/context budget → better answers without more product | **Shipped** |
-| **P2** | Ingest quality & reporting | Fewer bad chunks; agents can act on per-file errors | **Shipped** |
-| **P3** | MCP ↔ API parity + agent ergonomics | Remaining parity (path/url ingest API, docs, errors) | **Shipped** |
-| **P4** | Memories | Agent long-term notes; valuable but after curation/retrieval | **Shipped** |
-| **P5** | Nice-to-haves | Lower payoff or out of core headless path | **Hybrid + scoped filtering shipped**; rest backlog |
+### 1. Source reconstruction tools (next)
 
----
+**Why:** Agents can search and list sources, but cannot easily walk from a hit
+to the full ordered document text without re-searching ad hoc. Highest
+librarian-style payoff for a headless KB.
 
-## P0 — Document lifecycle + idempotency (shipped)
+**Ship:**
 
-- [x] **Core: source lifecycle**
-  - `list_sources(collection)` — distinct `source` (+ counts, `source_type`, sample `last_modified`)
-  - `delete_by_source(collection, source)`
-  - `delete_by_filter` (tags / `source_type` / `project` at minimum)
-  - Scroll/count helpers as needed (Qdrant scroll + payload filters)
-- [x] **True re-ingest policy** (use existing `ingest_hash` index)
-  - Same source + same content hash → **skip**
-  - Same source + different content → **delete old points for source, then upsert**
-  - Report `{ inserted, skipped, replaced, chunks }` on ingest paths
-- [x] **MCP tools** for list/delete-by-source/filter; extend ingest responses
-- [x] **HTTP API** mirrors of the same (do not leave lifecycle MCP-only)
-- [x] **Live smoke:** create → ingest → list_sources → re-ingest (skip/replace) → delete_by_source → search confirms
+- [ ] **`list_chunks` / `get_source`** — for a collection + `source`, return
+      chunks ordered by `chunk_index` (text + payload fields agents need for
+      citation). Paginate if large.
+- [ ] Optional **`expand_context`** — given a hit (or `source` + `chunk_index`),
+      return ±N neighboring chunks of the same source.
+- [ ] MCP + HTTP parity; live smoke; update `docs/AGENTS.md` matrix.
 
-**Done when:** an agent can fully manage a throwaway KB without `delete_collection`. ✅
+**Done when:** after a search hit, an agent can reconstruct the parent source’s
+indexed text in order without guessing filters.
+
+**Does not include:** storing original binaries/PDFs/audio files in lqm.
 
 ---
 
-## P1 — Richer retrieval (shipped)
+### 2. Sparse / scalable hybrid retrieval
 
-*High payoff once content can be curated; builds on existing search/context tools.*
+**Why:** Hybrid dense + keyword is shipped, but the keyword path **scrolls the
+full collection** (`O(n)` payloads). Fine for small/medium homelab corpora;
+the main quality-at-scale gap as vaults grow.
 
-- [x] **Richer filters** shared by `search` and `get_relevant_context`
-  - `source`, `project`, tag must (`tags`) / should (`tags_should`) / must_not (`tags_must_not`)
-  - `SearchFilter` → Qdrant `Filter` via `search_filter_to_qdrant` (ergonomic MCP args, not raw JSON blob)
-- [x] **Offset / pagination** — `SearchPage { results, offset, limit, has_more, next_offset }` (limit+1 probe)
-- [x] **Context budget** on `get_relevant_context` — `max_chars_per_passage`, `max_total_chars`, always-cite sources, clearer empty-result tip
-- [x] Optional **simple MMR** (`mmr` / `mmr_lambda`) — score + token-Jaccard diversity, pure post-process
+**Ship:**
 
-**Done when:** filtered, paginated context stays within a token budget with stable citations. ✅
+- [ ] Replace full-collection keyword scroll with a scalable approach (prefer
+      **native Qdrant sparse vectors**, or a dedicated keyword index) while
+      keeping dense-only as default.
+- [ ] Preserve MCP/HTTP `hybrid` / `hybrid_alpha` ergonomics; document scaling
+      in ARCHITECTURE.
+- [ ] Unit tests for fusion/index wiring; live smoke for rare-token recall.
 
-### Phase P1 notes (shipped)
+**Done when:** hybrid stays useful on large collections without full payload
+walks.
 
-- Core: `SearchOptions` / `search_page`, `ContextOptions` / `format_relevant_context_with`, `mmr_rerank`
-- MCP + API: same filter/pagination fields; `POST /api/context` for formatted retrieval
-
----
-
-## P2 — Ingest quality & reporting (shipped)
-
-*Medium effort; large quality gain for vaults/code/web agents use daily.*
-
-- [x] **Structured ingest reports** — per-file `{ path, ok, error, chunks }` via `file_results` on `ingest_path` / `ingest_many` / text+url
-- [x] **Markdown heading-aware chunking** — AT1–H6 sections then size limits (`chunk_markdown`)
-- [x] **Code-aware chunking** — fn/def/class/struct boundaries (`chunk_code`)
-- [x] **HTML hardening** — `<title>`, strip nav/footer/header, 2MB body cap, timeout
-- [x] **PDF** — `lqm-mcp` enables `lqm-ingest` `pdf` feature by default
-- [x] **`ingest_many`** — batch texts/paths/urls with one upsert and per-item results
-
-**Done when:** bulk path ingest returns actionable errors and chunks respect doc structure. ✅
-
-### Phase P2 notes
-
-- Core: `chunk_for_ingest` / `ChunkKind` dispatch from path extension + source_type
-- MCP: structure-aware chunking on all ingest tools; `file_results` accounting
+**Defer until:** corpora are large enough that current hybrid is measurably slow
+— unless building this alongside other retrieval work.
 
 ---
 
-## P3 — Surface parity + agent ergonomics (shipped)
+### 3. Real audio transcription (only if needed)
 
-*Unlocks “backend + API” replacement and reduces tool-calling mistakes.*
+**Why:** Audio paths currently emit `source_type=audio_placeholder` stubs.
+Worth doing **only if** agents ingest voice notes / podcasts into the KB.
 
-- [x] **HTTP API parity with MCP** — path/url/many ingest routes; create/info/sources/search/context already present
-- [x] **Stable payload schema** — `chunk_index`, `total_chunks`, `embedding_model` on upsert; constants in `payload_schema`
-- [x] **`get_embedder_info`** — MCP tool + `GET /api/embedder` (id, dimension, model)
-- [x] **Structured errors** — HTTP `{ code, message, error }`; shared `api_error` helpers
-- [x] **Agent docs** — `docs/AGENTS.md` tool matrix, search vs context, stdio/`serve`
-- [x] **HTTP bearer** — optional `LQM_API_TOKEN` → `Authorization: Bearer …` on `/api/*`
-- [x] **CI:** optional `live-qdrant` job with Qdrant service + `LQM_LIVE=1` smokes
-- [x] Offline embedder response parsers (`parse_ollama_embeddings` / `parse_openai_embeddings`) unit-tested (full wiremock HTTP still optional)
+**Ship:**
 
-**Done when:** every MCP capability has an HTTP equivalent and docs teach the tool set. ✅
+- [ ] Transcribe via whisper-rs or external ASR; store **transcript text**
+      chunks + `source` pointer (same storage model as PDF: text in Qdrant,
+      file stays on disk).
+- [ ] Prefer `source_type=audio` (or equivalent) for real transcripts; keep
+      placeholder filterable or remove once unused.
+- [ ] Feature-gate heavy deps; MCP/API path parity.
 
-### Phase P3 notes
+**Done when:** an agent can retrieve meaningful audio content by meaning, not
+metadata stubs.
 
-- See `docs/AGENTS.md` for the tool/API matrix and host config sketches
-- Payload keys: `docs/AGENTS.md` § Stable payload schema
-
----
-
-## P4 — Memories (shipped)
-
-*Long-term agent notes; generation stays in the host agent.*
-
-- [x] Memory schema — default collection `memories`, `source_type=memory`, payload `importance` / `last_accessed` / `memory_id`
-- [x] `store_memory` / `recall_memories` on RagCore + MCP + HTTP (`POST /api/memories`, `POST /api/memories/recall`)
-- [x] Optional recency blend (`use_recency`, half-life post-process over semantic scores)
-- [x] Pure unit tests for payload + blend ranking; live smoke `test_p4_memory_live_smoke` (skip if no Qdrant)
-
-**Done when:** agents can store notes and recall them by query without a chat-with-workspace tool. ✅
-
-### Phase P4 notes
-
-- Constants: `DEFAULT_MEMORY_COLLECTION`, `MEMORY_SOURCE_TYPE` in `lqm_core::memory`
-- Replace-by-source: same text+id re-ingest skips; changed text replaces via `memory://{id}` source
+**Skip if:** no audio ingest in your deployment.
 
 ---
 
-## P5 — Hybrid retrieval (partial; headless slice shipped)
+### 4. Offline MCP integration tests
 
-*Highest-leverage P5 item first: dense + keyword fusion without a second DB.*
+**Why:** Live smokes skip without Qdrant. PLAN called for turbomcp `channel` +
+`McpTestClient`; hermetic tool tests protect the surface as it grows.
 
-### Shipped
+**Ship:**
 
-- [x] Hybrid search mode on `SearchOptions` / `RagCore::search_page` (`hybrid`, `hybrid_alpha`)
-- [x] Pure fusion helpers in `lqm_core::hybrid` (tokenize, keyword_score, weighted + RRF fuse, merge candidates)
-- [x] MCP `search` / `get_relevant_context` and HTTP `POST /api/search` + `/api/context` accept `hybrid` / `hybrid_alpha` (dense-only default)
-- [x] Unit tests for fusion ranking; live smoke `test_p5_hybrid_live_smoke` (skip if no Qdrant)
+- [ ] Channel-transport harness with FakeEmbedder (and Qdrant mock or test
+      double as needed).
+- [ ] Cover tool registration + a representative subset of tool behaviors
+      offline; keep live smokes for real Qdrant.
+- [ ] Optional companion: HTTP router tests via `tower::ServiceExt` (same
+      spirit, lower priority than MCP harness).
 
-**Done when (met for hybrid):** agents can request hybrid retrieval so rare keywords still surface among hits. ✅
+**Done when:** `cargo test -p lqm-mcp` exercises tools without requiring a live
+Qdrant for the core contract.
 
-### Still backlog (not shipped)
+---
 
-- Audio transcription (whisper-rs) — replace `audio_placeholder` stubs
-- Dioxus richer SPA (MCP + API remain priority over UI)
-- WASM build of core for browser-side use
-- Chat-with-context tool (only if a host cannot generate itself)
-- Background re-index workers / heavy queues
-- Native Qdrant sparse vectors (optional upgrade; current hybrid is post-query fusion over dense + text; keyword path is O(n) scroll)
-- Channel-transport + `McpTestClient` offline MCP integration tests
-- Full HTTP router integration tests (`tower::ServiceExt`)
+## Later / optional (not sequenced)
 
-### Scoped filtering (shipped)
+Pick only if a concrete need appears:
 
-- [x] Payload keys `scope` + `clearance` (indexed); pure helpers in `lqm_core::scope`
-- [x] `SearchFilter` / `PayloadFilter` constraints `scope` + `max_clearance` → Qdrant filters
-- [x] MCP + HTTP ingest/search/context/delete_by_filter thin adapters
-- [x] Live smoke `test_scope_filter_live_smoke` (skip if no Qdrant); README + AGENTS docs
-
-**Done when (met):** agents can exclude other scopes / higher clearances without multi-user auth. ✅
+| Item | Notes |
+|------|--------|
+| Collection ↔ embedder hard guarantees | Refuse search on dim/model mismatch; optional model label at create |
+| Richer `list_sources` previews | Sample title / first-chunk preview / total chars |
+| Background re-index workers | Only if bulk refresh becomes painful |
+| Dioxus SPA | Demo UX; agents should prefer MCP/HTTP |
+| WASM core | Browser-side story, not agent replacement |
+| Chat-with-context tool | Only if a host cannot generate from `get_relevant_context` |
 
 ---
 
 ## Explicit non-goals
 
-Do not prioritize these while P0–P3 are open:
+Do not prioritize these for the headless agent-KB goal:
 
 - Multi-user auth, API-key admin consoles, multi-tenancy
 - AnythingLLM-style agent CRUD / `invoke_agent`
-- Full product chat UI and workspace chat history as a goal
-- Breadth-first connector race (Drive, Notion, …) before lifecycle + retrieval are solid
+- Full product chat UI and workspace chat history
+- Breadth-first SaaS connectors (Drive, Notion, …) — agents use other MCPs +
+  `ingest_*` with `source` pointers
+- Storing original media binaries inside lqm (paths/URLs as pointers only)
 
 ---
 
-## Suggested next milestone (single PR stack)
+## How to use this doc
 
-**P0–P4 (and part of P5) are shipped.** Prefer a single coherent slice from remaining
-backlog rather than re-doing early milestones:
-
-1. Channel-transport MCP integration tests (`McpTestClient`) without live Qdrant
-2. Sparse / keyword index for hybrid search (replace full collection scroll at scale)
-3. Real audio transcription (replace `audio_placeholder` stubs)
-
-Or pick the highest-value remaining P5 item for your deployment (Dioxus SPA, connectors).
-)
+1. Implement the **next unchecked item** in the active sequence (or jump with a
+   written reason in the PR).
+2. Update AGENTS / ARCHITECTURE / DECISIONS / README as needed.
+3. Drop the item from this roadmap when merged.
+4. Keep the AnythingLLM gap map in sync if capability vs product changes.

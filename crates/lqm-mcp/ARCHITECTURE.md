@@ -49,4 +49,4 @@ All tools stay thin: parse args → `RagCore` / `lqm-ingest`.
 
 - **Live smokes** against real Qdrant when available (`LQM_LIVE=1` hard-requires).
 - Workspace CI skips when Qdrant is down; optional `live-qdrant` job runs smokes.
-- Channel transport + `McpTestClient` offline suite is **planned** (see ROADMAP / AUDIT TC11), not yet the primary harness.
+- Channel transport + `McpTestClient` offline suite is **planned** (see `docs/ROADMAP.md` item 4 / AUDIT TC11), not yet the primary harness.

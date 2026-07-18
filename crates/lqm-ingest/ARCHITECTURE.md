@@ -45,4 +45,4 @@ The trait returns **text**, not chunks, by design: chunk strategy lives in
 ## Audio
 
 Audio extractors write a **placeholder** string and `source_type=audio_placeholder`
-so agents can filter stubs until real transcription ships (ROADMAP P5).
+so agents can filter stubs until real transcription ships (see `docs/ROADMAP.md`).

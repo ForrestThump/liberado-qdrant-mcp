@@ -8,9 +8,12 @@ homelab single-user use, with a clean migration path to a web frontend.
 > shorthand (binary names, crate prefixes, docs shorthand). Do **not** call it
 > "myrag" anywhere.
 
-> **Status (2026-07-18):** P0–P4 and hybrid/scope (part of P5) are **shipped**.
-> Treat milestone sections below as historical design intent; live status is
-> [`ROADMAP.md`](ROADMAP.md) and the
+> **Status (2026-07-18):** Headless agent knowledge layer through hybrid search
+> and scoped filtering is **shipped**. Treat milestone sections below as
+> historical design intent. **What exists today:** [`README.md`](../README.md),
+> [`docs/AGENTS.md`](AGENTS.md), [`docs/ARCHITECTURE.md`](ARCHITECTURE.md),
+> [`docs/DECISIONS.md`](DECISIONS.md). **What to build next:**
+> [`ROADMAP.md`](ROADMAP.md) (forward-looking only). Gap matrix:
 > [AnythingLLM gap map](../liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md).
 
 ---
@@ -131,7 +134,7 @@ liberado-qdrant-mcp/          # workspace root
 └── docs/
     ├── PLAN.md               # this file
     ├── ARCHITECTURE.md       # system-wide architecture
-    ├── ROADMAP.md            # running: shipped + next
+    ├── ROADMAP.md            # forward-looking next work only
     └── DECISIONS.md          # decision log w/ reasoning
 ```
 
@@ -377,7 +380,8 @@ Tests are added **alongside** features, not deferred.
 - **Docs kept in lockstep with code:**
   - `docs/ARCHITECTURE.md` — system-wide.
   - `crates/<crate>/ARCHITECTURE.md` — created when each crate is added.
-  - `docs/ROADMAP.md` — running list of shipped + next.
+  - `docs/ROADMAP.md` — forward-looking next work only (shipped state lives in
+    README / AGENTS / ARCHITECTURE / DECISIONS).
   - `docs/DECISIONS.md` — decision log with reasoning.
   - `AGENTS.md` — how agents should navigate the repo and which docs to
     read/update.
