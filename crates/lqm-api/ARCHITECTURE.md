@@ -1,32 +1,50 @@
 # lqm-api
 
-HTTP server powering the web frontend. Reuses `lqm-core` for all RAG logic.
+HTTP server for REST clients and a minimal static search UI. Reuses `lqm-core`
+for all RAG logic; stays in parity with MCP tools (see `docs/AGENTS.md` matrix).
 
 ## Stack
 
 - **HTTP:** axum 0.8
-- **CORS:** tower-http (any origin)
-- **Core:** delegates to `lqm-core`
+- **CORS / static:** tower-http
+- **Core:** `RagCore::from_env`; structure-aware `expand_chunks` → `expand_to_chunks`
+- **Auth:** optional `LQM_API_TOKEN` → Bearer on `/api/*` (`/health` open)
 
 ## Endpoints
 
-| Method | Path | Description |
-|---|---|---|
+| Method | Path | Notes |
+|--------|------|--------|
 | `GET` | `/health` | `{ status, version }` |
-| `GET` | `/api/collections` | `{ collections: [...] }` |
-| `DELETE` | `/api/collections/{name}` | `204 No Content` |
-| `POST` | `/api/search` | `{ results: [...] }` |
-| `POST` | `/api/ingest` | `{ status, collection }` |
-| `GET` | `/` | RAG search UI |
+| `GET` | `/api/collections` | list |
+| `POST` | `/api/collections` | create |
+| `GET` | `/api/collections/{name}` | info |
+| `DELETE` | `/api/collections/{name}` | delete |
+| `GET` | `/api/collections/{name}/sources` | list_sources |
+| `DELETE` | `/api/collections/{name}/sources/{source}` | delete_by_source |
+| `POST` | `/api/collections/{name}/delete_by_filter` | filter delete |
+| `POST` | `/api/search` | filters, hybrid, pagination |
+| `POST` | `/api/context` | get_relevant_context |
+| `POST` | `/api/ingest` | text; **structure-aware chunking** |
+| `POST` | `/api/ingest/path` | file/dir |
+| `POST` | `/api/ingest/url` | remote URL |
+| `POST` | `/api/ingest/many` | batch |
+| `GET` | `/api/embedder` | embedder info |
+| `POST` | `/api/memories` | store_memory |
+| `POST` | `/api/memories/recall` | recall_memories |
+| `GET` | `/` | static search UI |
+| — | `static/` | ServeDir fallback |
+
+Errors: JSON `{ "code", "message", "error" }` via `lqm_core::structured_error`.
 
 ## Configuration
 
 ```
 lqm-api --host 127.0.0.1 --port 8080
 lqm-api --config embedder.toml --qdrant-url http://localhost:6334
+# or QDRANT_URL env
 ```
 
-## Static files
+## Static UI
 
-`static/` directory served for static assets. Includes `index.html` — a
-dark-themed RAG search UI with JavaScript form handling.
+`static/index.html` is an interim dark-mode search page until a Dioxus SPA
+(ROADMAP P5). Not the product goal — agents should prefer MCP/HTTP tools.

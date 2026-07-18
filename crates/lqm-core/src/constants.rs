@@ -1,0 +1,71 @@
+//! Shared defaults and magic-number replacements for the entire workspace.
+//!
+//! Prefer these named consts over bare literals throughout the crate.
+
+// ── Embedding defaults ──────────────────────────────────────────────
+pub const DEFAULT_FAKE_DIM: usize = 384;
+pub const DEFAULT_FASTEMBED_DIM: usize = 384;
+pub const DEFAULT_OLLAMA_DIM: usize = 768;
+pub const DEFAULT_OPENAI_DIM: usize = 1536;
+pub const DEFAULT_FASTEMBED_MODEL: &str = "AllMiniLML6V2";
+pub const DEFAULT_BACKEND: &str = "fastembed";
+
+// ── Chunking ────────────────────────────────────────────────────────
+pub const DEFAULT_CHUNK_SIZE: usize = 2048;
+pub const DEFAULT_CHUNK_OVERLAP: usize = 200;
+/// Overlap divisor for word-level sliding window (advance = overlap / DIV).
+pub const SLIDING_WINDOW_WORD_OVERLAP_DIV: usize = 5;
+/// Overlap divisor for line-level sliding window.
+pub const SLIDING_WINDOW_LINE_OVERLAP_DIV: usize = 40;
+pub const SLIDING_WINDOW_MIN_OVERLAP_LINES: usize = 1;
+
+// ── Search defaults ─────────────────────────────────────────────────
+pub const DEFAULT_SEARCH_LIMIT: u64 = 10;
+pub const DEFAULT_CONTEXT_LIMIT: u64 = 8;
+/// Extra hit fetched to detect `has_more` without a separate count call.
+pub const HAS_MORE_EXTRA: u64 = 1;
+pub const SCROLL_PAGE_SIZE: u32 = 256;
+pub const KEYWORD_SCROLL_PAGE: u32 = 128;
+
+// ── Hybrid retrieval ────────────────────────────────────────────────
+/// Phrase / substring bonus added to keyword score when full query appears.
+pub const KEYWORD_PHRASE_BONUS: f32 = 0.25;
+/// Blend weight for weighted + RRF score fusion.
+pub const HYBRID_FUSE_WEIGHTED: f32 = 0.5;
+pub const HYBRID_FUSE_RRF: f32 = 0.5;
+
+// ── Context formatting ──────────────────────────────────────────────
+pub const DEFAULT_MMR_LAMBDA: f32 = 0.7;
+pub const TEXT_PREVIEW_CHARS: usize = 160;
+
+// ── HTML extraction (lqm-ingest) ────────────────────────────────────
+pub const HTML_LOOKAHEAD_CHARS: usize = 256;
+
+// ── Memory blend weights ────────────────────────────────────────────
+pub const MEMORY_BLEND_SEM_WEIGHT: f32 = 0.75;
+pub const MEMORY_BLEND_IMP_WEIGHT: f32 = 0.25;
+pub const MEMORY_BLEND_RECENCY_SEM_WEIGHT: f32 = 0.60;
+pub const MEMORY_BLEND_RECENCY_IMP_WEIGHT: f32 = 0.25;
+pub const MEMORY_BLEND_RECENCY_REC_WEIGHT: f32 = 0.15;
+/// Default half-life for recency decay (~7 days in seconds).
+pub const MEMORY_RECENCY_HALF_LIFE: f32 = 7.0 * 86400.0;
+
+// ── Default source strings (canonical values owned by `SourceType`) ─
+// These re-export `SourceType::as_str()` so call sites can keep using constants
+// without circular imports at const time (literal duplicates of the enum strings).
+pub const SOURCE_TYPE_TEXT: &str = "text";
+pub const SOURCE_TYPE_WEBPAGE: &str = "webpage";
+pub const SOURCE_TYPE_URL: &str = "url";
+pub const SOURCE_TYPE_PDF: &str = "pdf";
+pub const SOURCE_TYPE_AUDIO: &str = "audio";
+/// Placeholder audio (no transcription yet) — filterable distinct from real audio.
+pub const SOURCE_TYPE_AUDIO_PLACEHOLDER: &str = "audio_placeholder";
+pub const SOURCE_TYPE_MARKDOWN: &str = "markdown";
+pub const SOURCE_TYPE_CODE: &str = "code";
+pub const SOURCE_TYPE_MEMORY: &str = "memory";
+
+/// Default source for single-shot API ingest.
+pub const DEFAULT_API_INGEST_SOURCE: &str = "api-ingest";
+
+/// Default Qdrant gRPC endpoint.
+pub const DEFAULT_QDRANT_URL: &str = "http://localhost:6334";

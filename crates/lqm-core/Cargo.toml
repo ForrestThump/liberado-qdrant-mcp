@@ -13,7 +13,8 @@ embed-openai = ["dep:reqwest"]
 fastembed = { version = "5", optional = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 qdrant-client = "1"
-tokio = { version = "1", features = ["full"] }
+# Library crate: only the Tokio features core needs (rt for tests/async trait, sync for Semaphore).
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
