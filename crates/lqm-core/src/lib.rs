@@ -30,8 +30,10 @@ pub use context::{
     mmr_rerank,
 };
 pub use hybrid::{
-    DEFAULT_HYBRID_ALPHA, DEFAULT_RRF_K, fuse_dense_keyword, hybrid_dense_fetch_limit,
-    keyword_score, merge_and_fuse_hybrid, tokenize_for_keyword,
+    DEFAULT_HYBRID_ALPHA, DEFAULT_RRF_K, HybridKeywordBackend, SparseEncoding, encode_sparse_tf,
+    fuse_dense_keyword, hash_token, hybrid_dense_fetch_limit, hybrid_keyword_backend_from_env,
+    keyword_candidates_from_payloads, keyword_score, merge_and_fuse_hybrid, text_index_query,
+    tokenize_for_keyword,
 };
 pub use lifecycle::decide_source_reingest;
 pub use memory::{

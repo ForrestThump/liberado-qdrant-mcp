@@ -36,33 +36,9 @@ are not copied into a blob store. See ARCHITECTURE and DECISIONS.
 
 ## Active sequence (by leverage)
 
-Do these **in order** unless a deployment constraint forces a jump (e.g. large
-corpus already needs sparse hybrid before other work).
+Do these **in order** unless a deployment constraint forces a jump.
 
-### 1. Sparse / scalable hybrid retrieval
-
-**Why:** Hybrid dense + keyword is shipped, but the keyword path **scrolls the
-full collection** (`O(n)` payloads). Fine for small/medium homelab corpora;
-the main quality-at-scale gap as vaults grow.
-
-**Ship:**
-
-- [ ] Replace full-collection keyword scroll with a scalable approach (prefer
-      **native Qdrant sparse vectors**, or a dedicated keyword index) while
-      keeping dense-only as default.
-- [ ] Preserve MCP/HTTP `hybrid` / `hybrid_alpha` ergonomics; document scaling
-      in ARCHITECTURE.
-- [ ] Unit tests for fusion/index wiring; live smoke for rare-token recall.
-
-**Done when:** hybrid stays useful on large collections without full payload
-walks.
-
-**Defer until:** corpora are large enough that current hybrid is measurably slow
-— unless building this alongside other retrieval work.
-
----
-
-### 2. Real audio transcription (only if needed)
+### 1. Real audio transcription (only if needed)
 
 **Why:** Audio paths currently emit `source_type=audio_placeholder` stubs.
 Worth doing **only if** agents ingest voice notes / podcasts into the KB.
@@ -83,7 +59,7 @@ metadata stubs.
 
 ---
 
-### 3. Offline MCP integration tests
+### 2. Offline MCP integration tests
 
 **Why:** Live smokes skip without Qdrant. PLAN called for turbomcp `channel` +
 `McpTestClient`; hermetic tool tests protect the surface as it grows.

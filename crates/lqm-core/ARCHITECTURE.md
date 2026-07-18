@@ -25,7 +25,7 @@ src/
 ├── lifecycle.rs — decide_source_reingest (pure skip/replace/insert)
 ├── reconstruction.rs — list/sort/paginate/expand source chunks (pure)
 ├── memory.rs    — MemoryNote/Hit, blend ranking, DEFAULT_MEMORY_COLLECTION
-├── hybrid.rs    — keyword_score, RRF + weighted fuse (pure)
+├── hybrid.rs    — keyword_score, sparse TF encode, backend enum, RRF fuse (pure)
 ├── scope.rs     — scope match + clearance ranks
 ├── source_type.rs — SourceType enum (canonical as_str literals)
 ├── constants.rs — defaults (chunk size, search limits, SOURCE_TYPE_* mirrors)
@@ -43,7 +43,8 @@ src/
 - `ensure_collection(name, Option<dim>)` — `None` uses active embedder dimension
 - `ensure_indexes()` keyword indexes: source, source_type, ingest_hash, project, tags, scope, clearance  
   (no payload `collection` field — Qdrant collection name is the namespace)
-- `search_page` + hybrid optional (`scroll_payloads` is O(n); see workspace ARCHITECTURE scaling)
+- `search_page` + hybrid optional; keyword backends via `LQM_HYBRID_KEYWORD_BACKEND`
+  (`keyword_index` default, `sparse`, `scroll` legacy) — see workspace ARCHITECTURE
 - Memories: collection `memories`, `source_type=memory`, optional recency blend
 - Scoped filtering: `scope` exact + `clearance` ordinal / `max_clearance`
 - Source reconstruction: `list_chunks` / `get_source` / `expand_context` (order by

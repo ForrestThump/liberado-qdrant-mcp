@@ -178,23 +178,34 @@ plus optional importance/recency re-rank; no server-side LLM generation.
 touch-on-recall writes, or hybrid sparse+dense over memories only.
 
 ---
-## 012 — Hybrid search via post-query dense+keyword fusion (not native sparse)
+## 012 — Hybrid search with selectable keyword backends (sparse + text index + scroll)
 
-**Date:** 2026-07-18
+**Date:** 2026-07-18 (updated same day for scalable backends)
 
 **What:** Hybrid retrieval is an optional flag on `search_page` / MCP `search` /
-HTTP `/api/search`. It over-fetches dense hits, optionally merges keyword-
-matching scroll candidates, and fuses scores with weighted normalized dense+
-keyword signals plus reciprocal rank fusion (RRF). No Qdrant sparse vector
-schema or second index.
+HTTP `/api/search` (`hybrid` / `hybrid_alpha` unchanged). It over-fetches dense
+hits, merges keyword candidates, and fuses with weighted normalized dense+
+keyword signals plus RRF. Keyword candidates come from a **configurable
+backend** (`LQM_HYBRID_KEYWORD_BACKEND` / `RagConfig.hybrid_keyword_backend`):
+
+| Value | Behavior |
+|-------|----------|
+| `keyword_index` (default) | Payload full-text index on `text` + `MatchTextAny` filtered scroll |
+| `sparse` | Native Qdrant sparse vector (named `sparse`); TF encode at ingest/query |
+| `scroll` | Legacy full-collection payload scroll (A/B / tiny corpora) |
+
+Dense-only remains the default when `hybrid` is omitted/false. New collections
+under `sparse` get sparse schema; dense-only collections fall back safely if
+sparse search fails.
 
 **Why:**
-- Ships keyword rescue for rare tokens without collection migrations.
-- Fusion helpers are pure and unit-tested offline (CI without Qdrant).
-- Dense-only default keeps existing agents/tests stable.
+- Operators/models can A/B which keyword path works best without code changes.
+- `keyword_index` scales without recreating existing dense collections.
+- `sparse` offers ANN lexical retrieval for large corpora after create+reingest.
+- Fusion helpers stay pure and unit-tested offline.
 
-**Revisit if:** collections grow large enough that scroll candidate scans hurt
-latency, or agents need true sparse BM25 indexes in Qdrant.
+**Revisit if:** true BM25 / learned sparse models, or multi-vector product ranking
+is required beyond hash-TF sparse.
 
 ---
 ## 013 — Scoped filtering via payload scope + clearance (not multi-user auth)

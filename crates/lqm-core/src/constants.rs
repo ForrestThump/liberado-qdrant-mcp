@@ -33,6 +33,16 @@ pub const KEYWORD_PHRASE_BONUS: f32 = 0.25;
 /// Blend weight for weighted + RRF score fusion.
 pub const HYBRID_FUSE_WEIGHTED: f32 = 0.5;
 pub const HYBRID_FUSE_RRF: f32 = 0.5;
+/// Named sparse vector used when `LQM_HYBRID_KEYWORD_BACKEND=sparse`.
+pub const SPARSE_VECTOR_NAME: &str = "sparse";
+/// Hash-space modulus for deterministic token → sparse index mapping.
+pub const SPARSE_HASH_MODULUS: u32 = 2_000_003;
+/// Cap non-zero sparse dimensions per document (after frequency merge).
+pub const SPARSE_MAX_DIMS: usize = 256;
+/// Max keyword candidates pulled from index/sparse paths before fusion.
+pub const KEYWORD_CANDIDATE_LIMIT: u64 = 64;
+/// Env var for hybrid keyword backend (`scroll` | `sparse` | `keyword_index`).
+pub const ENV_HYBRID_KEYWORD_BACKEND: &str = "LQM_HYBRID_KEYWORD_BACKEND";
 
 // ── Context formatting ──────────────────────────────────────────────
 pub const DEFAULT_MMR_LAMBDA: f32 = 0.7;

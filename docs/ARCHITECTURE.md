@@ -100,10 +100,21 @@ query → embed(query) → Qdrant dense search (+ SearchFilter)
 
 ```
 query → dense search (over-fetch)
-      → scroll_payloads (full collection, keyword scores)
+      → keyword candidates (backend-selected; see below)
       → merge_and_fuse_hybrid (weighted + RRF)
       → page slice
 ```
+
+Keyword backends (`LQM_HYBRID_KEYWORD_BACKEND`, default `keyword_index`):
+
+| Backend | How candidates are found | Schema needs |
+|---------|--------------------------|--------------|
+| `keyword_index` | Scroll with `MatchTextAny` on payload `text` (full-text index) | Text index on `text` (auto on ensure) |
+| `sparse` | Qdrant sparse ANN on named vector `sparse` | Collection created with sparse config; points store sparse at ingest |
+| `scroll` | Full-collection payload scroll + client TF scoring (legacy O(n)) | None beyond existing payload |
+
+Dense-only remains the default when `hybrid` is omitted/false. Sparse collections
+that lack the sparse schema fall back to `keyword_index` then `scroll`.
 
 ### Memory recall
 
@@ -121,10 +132,15 @@ Homelab-friendly defaults; know these before large corpora:
 
 | Operation | Complexity | Notes |
 |-----------|------------|--------|
-| Hybrid search keyword path | O(n) points | `scroll_payloads` walks the whole collection (page size `KEYWORD_SCROLL_PAGE`). Fine for thousands of points; at 10k+ consider sparse vectors or a keyword index. |
+| Hybrid keyword (`keyword_index`) | ~O(matches) | Text-index-backed `MatchTextAny` scroll; candidate cap `KEYWORD_CANDIDATE_LIMIT`. Prefer for existing dense-only collections. |
+| Hybrid keyword (`sparse`) | ~O(log n) sparse ANN | Named sparse vector `sparse` + TF encoding at ingest/query. Create collection with sparse schema (default when backend=`sparse`). Re-ingest needed if collection was dense-only. |
+| Hybrid keyword (`scroll`) | O(n) points | Legacy full payload walk (`KEYWORD_SCROLL_PAGE`). A/B / small corpora only. |
 | `list_sources` | O(n) payloads | Full payload scroll to aggregate source counts. |
 | Embed concurrency | `num_cpus` semaphore | `embed_semaphore` default = CPU count; raise carefully under heavy concurrent ingest. |
 | Payload→JSON conversion | O(keys × hits) | Shared `qdrant_value_to_json`; still allocates per hit — acceptable for typical agent page sizes. |
+
+**A/B backends:** set `LQM_HYBRID_KEYWORD_BACKEND=sparse` or `keyword_index` (or
+`scroll`) before starting MCP/API/CLI. Same `hybrid` / `hybrid_alpha` tool params.
 
 ## Concurrency Model
 

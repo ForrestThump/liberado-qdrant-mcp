@@ -45,6 +45,7 @@ lqm-mcp serve        → streamable HTTP (persistent, single model in RAM)
 Ingest tools return `{ inserted, skipped, replaced, chunks }` (+ `file_results` where multi-item).
 
 Optional ingest fields: `scope`, `clearance`. Search/context: `scope`, `max_clearance`, `hybrid`, `hybrid_alpha`.
+Keyword backend is process config (`LQM_HYBRID_KEYWORD_BACKEND`), not a tool arg.
 
 All tools stay thin: parse args → `RagCore` / `lqm-ingest`.
 
@@ -52,4 +53,4 @@ All tools stay thin: parse args → `RagCore` / `lqm-ingest`.
 
 - **Live smokes** against real Qdrant when available (`LQM_LIVE=1` hard-requires).
 - Workspace CI skips when Qdrant is down; optional `live-qdrant` job runs smokes.
-- Channel transport + `McpTestClient` offline suite is **planned** (see `docs/ROADMAP.md` item 3 / AUDIT TC11), not yet the primary harness.
+- Channel transport + `McpTestClient` offline suite is **planned** (see `docs/ROADMAP.md` offline MCP tests / AUDIT TC11), not yet the primary harness.

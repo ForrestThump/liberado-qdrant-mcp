@@ -26,7 +26,17 @@ Headless RAG for LLM agents: **Qdrant + embeddings + MCP/HTTP**. No chat UI.
 
 **Search vs context:** `search` returns JSON hits (`text`, `score`, `payload`) plus pagination (`offset`, `has_more`, `next_offset`). `get_relevant_context` reuses the same filters/pagination, optionally applies MMR and a char budget, and returns markdown with numbered passages and a `sources` array.
 
-**Hybrid retrieval:** set `hybrid=true` on `search` / `get_relevant_context` (or JSON body for HTTP). Core over-fetches dense hits, merges keyword-matching scroll candidates, and fuses with weighted dense + keyword scores and RRF. Response includes `"hybrid": true`. Default remains dense-only when `hybrid` is omitted/false. **Scaling:** keyword merge scrolls the collection (O(n) payloads); fine for homelab size; see `docs/ARCHITECTURE.md` scaling section for large corpora.
+**Hybrid retrieval:** set `hybrid=true` on `search` / `get_relevant_context` (or JSON body for HTTP). Core over-fetches dense hits, merges keyword candidates, and fuses with weighted dense + keyword scores and RRF. Response includes `"hybrid": true`. Default remains dense-only when `hybrid` is omitted/false.
+
+**Keyword backend (process env, not a per-request param):** `LQM_HYBRID_KEYWORD_BACKEND`:
+
+| Value | Use when |
+|-------|----------|
+| `keyword_index` (default) | Existing dense collections; index-backed text match (no full scroll) |
+| `sparse` | Large corpora; recreate/create collection with sparse schema + re-ingest |
+| `scroll` | Legacy O(n) full scroll for A/B comparison only |
+
+See `docs/ARCHITECTURE.md` scaling section.
 
 **Ingest parity:** MCP, HTTP, and CLI all structure-aware-chunk via `RagCore::expand_to_chunks` before embed/upsert.
 
@@ -74,6 +84,7 @@ Errors on HTTP are JSON: `{ "code": "validation_error", "message": "...", "error
 # Env
 export QDRANT_URL=http://127.0.0.1:6334
 # optional: LQM_CONFIG=/path/to/lqm.toml
+# optional: LQM_HYBRID_KEYWORD_BACKEND=keyword_index|sparse|scroll
 
 lqm-mcp
 ```
