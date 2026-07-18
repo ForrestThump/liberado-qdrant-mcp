@@ -24,14 +24,21 @@ Living document. Move items from "Next" to "Shipped" as milestones are completed
 - **PDF integration test** — minimal PDF fixture test for `pdf` feature
 - **CI/CD pipeline** — GitHub Actions: fmt, clippy, test on push/PR
 
+## Shipped (Phase 1 agent RAG tools)
+
+- **Collection management MCP tools** — `create_collection` (embedder dim by default), `delete_collection`, `get_collection_info` via shared `RagCore` / Qdrant layer
+- **Remote URL ingestion** — `lqm-ingest` HTML/plain extractors + `fetch_url`; `ingest_url` MCP tool reuses chunk→embed→upsert
+- **Agent context retrieval** — `format_relevant_context` helper + `get_relevant_context` MCP tool (numbered passages, citations, scores)
+
 ## Next
 
 - Per-source-type chunking (markdown heading-aware, code function-aware)
-- `collection_info` MCP tool
+- Richer Qdrant filters / `list_sources` / `delete_by_source` (Phase 2)
 - Mock HTTP tests for Ollama/OpenAI embedders
 
 ## Backlog
 
+- Memories abstraction (`store_memory` / `recall_memories`) — Phase 3
 - Dioxus web frontend (richer SPA)
 - Audio transcription integration (whisper-rs)
 - Clearance-safe / scoped filtering

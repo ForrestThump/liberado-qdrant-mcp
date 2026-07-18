@@ -18,7 +18,24 @@ lqm-mcp serve        → HTTP server (persistent, single model in RAM)
   --port 8080        → port (default)
 ```
 
+## MCP tools
+
+| Tool | Role |
+|------|------|
+| `ingest_text` | Embed/upsert a text blob (auto-creates collection) |
+| `ingest_path` | Walk file/dir via `lqm-ingest` extractors |
+| `ingest_url` | HTTP(S) fetch + HTML/plain extract → chunk/embed/upsert |
+| `search` | Semantic search; raw JSON hits |
+| `get_relevant_context` | Search + markdown passages with scores/sources |
+| `list_collections` | Collection names |
+| `create_collection` | Create/ensure; dim defaults to active embedder |
+| `delete_collection` | Drop collection |
+| `get_collection_info` | Points, vector size, distance, status |
+
+All tools parse args and delegate to `RagCore` / `lqm-ingest` — no Qdrant/embed reimplementation in this binary.
+
 ## Testing
 
 Integration tests use turbomcp's `channel` transport + `McpTestClient`.
 A connectivity check on Qdrant ensures graceful skip when Qdrant is unavailable.
+Pure unit tests for HTML extraction and context formatting live in `lqm-ingest` / `lqm-core`.
