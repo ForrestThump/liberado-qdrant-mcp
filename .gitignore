@@ -1,3 +1,38 @@
-/target
-/Cargo.lock
+# ── Rust / Cargo ──────────────────────────────────────────
+# Workspace builds land at the repo root. Keep committed for binaries
+# (lqm-mcp, lqm-cli, lqm-api); do not ignore Cargo.lock.
+/target/
+**/*.rs.bk
+*.pdb
+
+# ── Local config & secrets ────────────────────────────────
+# example.toml is the committed template; real configs stay local.
+lqm.toml
+*.local.toml
+.env
+.env.*
+!.env.example
+
+# ── Model / embedding caches ──────────────────────────────
+# fastembed (and similar) download ONNX models beside the crate cwd.
 **/.fastembed_cache/
+**/.cache/
+
+# ── OS / editor noise ─────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+*~
+*.swp
+*.swo
+
+# JetBrains / VS Code local state (keep shared .vscode settings if you add them)
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# ── Misc local artifacts ──────────────────────────────────
+*.log
+*.tmp
+*.temp
