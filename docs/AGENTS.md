@@ -24,7 +24,9 @@ Headless RAG for LLM agents: **Qdrant + embeddings + MCP/HTTP**. No chat UI.
 
 **Search vs context:** `search` returns JSON hits (`text`, `score`, `payload`) plus pagination (`offset`, `has_more`, `next_offset`). `get_relevant_context` reuses the same filters/pagination, optionally applies MMR and a char budget, and returns markdown with numbered passages and a `sources` array.
 
-**Hybrid retrieval:** set `hybrid=true` on `search` / `get_relevant_context` (or JSON body for HTTP). Core over-fetches dense hits, merges keyword-matching scroll candidates, and fuses with weighted dense + keyword scores and RRF. Response includes `"hybrid": true`. Default remains dense-only when `hybrid` is omitted/false.
+**Hybrid retrieval:** set `hybrid=true` on `search` / `get_relevant_context` (or JSON body for HTTP). Core over-fetches dense hits, merges keyword-matching scroll candidates, and fuses with weighted dense + keyword scores and RRF. Response includes `"hybrid": true`. Default remains dense-only when `hybrid` is omitted/false. **Scaling:** keyword merge scrolls the collection (O(n) payloads); fine for homelab size; see `docs/ARCHITECTURE.md` scaling section for large corpora.
+
+**Ingest parity:** MCP, HTTP, and CLI all structure-aware-chunk via `RagCore::expand_to_chunks` before embed/upsert.
 
 **Scoped filtering:** optional payload keys `scope` (exact partition) and `clearance` (`public` | `internal` | `confidential` | `restricted`). Search/context accept `scope` and `max_clearance` (admits that level and all lower). Unscoped search is the default. Delete-by-filter accepts the same constraints. Not multi-user auth — agents pass the scope they are allowed to see.
 
@@ -111,7 +113,7 @@ Written by the shared upsert path:
 | `text` | Chunk body |
 | `ingest_hash` | SHA-256 of text |
 | `source` | Origin path/URL/id |
-| `source_type` | e.g. text, webpage, pdf |
+| `source_type` | e.g. text, webpage, pdf, markdown, code, memory, `audio_placeholder` |
 | `tags` | string array |
 | `project` | optional scope |
 | `timestamp` / `last_modified` | optional strings |

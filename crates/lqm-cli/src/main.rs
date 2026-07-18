@@ -1,7 +1,6 @@
 use clap::{Parser, Subcommand};
-use lqm_core::config::{EmbedderConfig, create_embedder};
-use lqm_core::types::{DEFAULT_COLLECTION_NAME, DocumentChunk, RagConfig};
-use lqm_core::{QdrantClient, RagCore};
+use lqm_core::RagCore;
+use lqm_core::types::resolve_collection;
 use std::path::Path;
 
 #[derive(Parser)]
@@ -55,14 +54,8 @@ fn file_modified_secs(path: &Path) -> Option<String> {
 }
 
 async fn make_core(qdrant_url: &str, config_path: Option<&str>) -> Option<RagCore> {
-    let config = EmbedderConfig::load_or_default(config_path).ok()?;
-    let embedder = create_embedder(&config).ok()?;
-    let qdrant = QdrantClient::new(qdrant_url).await.ok()?;
-    let core = RagCore::from_config(qdrant, embedder, &RagConfig::default());
-    match core.list_collections().await {
-        Ok(_) => Some(core),
-        Err(_) => None,
-    }
+    // from_env already validates Qdrant connectivity via list_collections.
+    RagCore::from_env(Some(qdrant_url), config_path).await.ok()
 }
 
 async fn cmd_ingest(
@@ -71,10 +64,9 @@ async fn cmd_ingest(
     collection: Option<String>,
     source_type: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let coll = collection
-        .clone()
-        .unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+    let coll = resolve_collection(collection);
     log::info!("ingesting into collection '{}'", coll);
+    core.ensure_collection(&coll, None).await?;
 
     let extractors = lqm_ingest::all_extractors();
     let p = Path::new(path);
@@ -133,24 +125,20 @@ async fn ingest_single_file(
         .unwrap_or_else(|| extractor.source_type().to_string());
     let modified = file_modified_secs(path);
 
-    let chunk = DocumentChunk {
-        text,
-        source: Some(source.clone()),
-        source_type: Some(st),
-        collection: Some(collection.to_string()),
-        tags: None,
-        timestamp: None,
-        project: None,
-        last_modified: modified,
-        chunk_index: Some(0),
-        total_chunks: Some(1),
-        importance: None,
-        memory_id: None,
-        scope: None,
-        clearance: None,
-    };
+    let chunks = core.expand_to_chunks(
+        &text,
+        Some(source.clone()),
+        Some(st),
+        collection.to_string(),
+        None,
+        None,
+        modified,
+        Some(&source),
+        None,
+        None,
+    );
 
-    match core.embed_and_upsert_batch(vec![chunk]).await {
+    match core.embed_and_upsert_batch(chunks).await {
         Ok(report) => println!(
             "ingested {source}: chunks={} inserted={} skipped={} replaced={}",
             report.chunks, report.inserted, report.skipped, report.replaced

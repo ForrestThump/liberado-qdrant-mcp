@@ -1,6 +1,7 @@
 //! Agent-friendly formatting of search results as LLM-ready context.
 
-use crate::types::{ContextOptions, SearchResult};
+use crate::constants;
+use crate::types::{ContextOptions, SearchResult, payload_str};
 use serde::Serialize;
 use std::collections::HashSet;
 
@@ -53,7 +54,10 @@ pub fn format_relevant_context_with(
 ) -> FormattedContext {
     let mut working: Vec<SearchResult> = results.to_vec();
     if opts.mmr && !working.is_empty() {
-        let lambda = opts.mmr_lambda.unwrap_or(0.7).clamp(0.0, 1.0);
+        let lambda = opts
+            .mmr_lambda
+            .unwrap_or(constants::DEFAULT_MMR_LAMBDA)
+            .clamp(0.0, 1.0);
         let k = working.len();
         working = mmr_rerank(working, k, lambda);
     }
@@ -122,13 +126,17 @@ pub fn format_relevant_context_with(
         body.push_str(&block);
         included += 1;
 
-        let preview: String = result.text.chars().take(160).collect();
+        let preview: String = result
+            .text
+            .chars()
+            .take(constants::TEXT_PREVIEW_CHARS)
+            .collect();
         sources.push(ContextSource {
             index,
             score: result.score,
             source,
             source_type,
-            text_preview: if result.text.chars().count() > 160 {
+            text_preview: if result.text.chars().count() > constants::TEXT_PREVIEW_CHARS {
                 format!("{preview}…")
             } else {
                 preview
@@ -213,13 +221,6 @@ fn tokenize(s: &str) -> HashSet<String> {
         .filter(|t| t.len() > 1)
         .map(|t| t.to_string())
         .collect()
-}
-
-fn payload_str(payload: &serde_json::Value, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
 }
 
 fn escape_md_inline(s: &str) -> String {
@@ -363,6 +364,37 @@ mod tests {
                 .map(|r| &r.payload["source"])
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn mmr_edge_k_zero_and_empty() {
+        let results = vec![hit("a", 1.0, "1", "text")];
+        assert!(mmr_rerank(results.clone(), 0, 0.5).is_empty());
+        assert!(mmr_rerank(vec![], 3, 0.5).is_empty());
+    }
+
+    #[test]
+    fn mmr_edge_k_larger_than_input() {
+        let results = vec![hit("a", 1.0, "1", "text"), hit("b", 0.5, "2", "text")];
+        let out = mmr_rerank(results, 10, 0.7);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn mmr_lambda_extremes() {
+        let results = vec![
+            hit("cats cats cats", 1.0, "1", "text"),
+            hit("cats cats more", 0.9, "2", "text"),
+            hit("quantum computing", 0.4, "3", "text"),
+        ];
+        // lambda=1.0 → pure relevance order (top-k by score).
+        let pure_rel = mmr_rerank(results.clone(), 2, 1.0);
+        assert_eq!(pure_rel[0].payload["source"], "1");
+        assert_eq!(pure_rel[1].payload["source"], "2");
+        // lambda=0.0 → pure diversity after first (highest score) pick.
+        let pure_div = mmr_rerank(results, 2, 0.0);
+        assert_eq!(pure_div.len(), 2);
+        assert_eq!(pure_div[0].payload["source"], "1");
     }
 
     #[test]

@@ -8,6 +8,11 @@ homelab single-user use, with a clean migration path to a web frontend.
 > shorthand (binary names, crate prefixes, docs shorthand). Do **not** call it
 > "myrag" anywhere.
 
+> **Status (2026-07-18):** P0–P4 and hybrid/scope (part of P5) are **shipped**.
+> Treat milestone sections below as historical design intent; live status is
+> [`ROADMAP.md`](ROADMAP.md) and the
+> [AnythingLLM gap map](../liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md).
+
 ---
 
 ## 1. Goals & Non-Goals
@@ -120,7 +125,7 @@ liberado-qdrant-mcp/          # workspace root
 │   ├── lqm-cli/              # bulk ingest, admin commands (clap)
 │   │   ├── src/main.rs
 │   │   └── ARCHITECTURE.md
-│   └── lqm-api/              # future: HTTP server for Dioxus frontend (axum)
+│   └── lqm-api/              # HTTP REST parity with MCP (axum); static UI interim
 │       ├── src/main.rs
 │       └── ARCHITECTURE.md
 └── docs/
@@ -131,7 +136,7 @@ liberado-qdrant-mcp/          # workspace root
 ```
 
 Notes:
-- `lqm-api` and any Dioxus frontend crate are **future / nice-to-have**.
+- `lqm-api` is **shipped** (REST parity). A richer Dioxus SPA remains backlog.
 - Each crate carries its own `ARCHITECTURE.md`, created when the crate is added.
 - Prefer more, smaller crates over fewer large ones when it improves decoupling.
 
@@ -162,7 +167,7 @@ Notes:
 - Bulk ingestion, admin commands, collection management via `clap`.
 - Also useful for benchmarking embedders.
 
-**`lqm-api`** (future binary)
+**`lqm-api`** (shipped binary)
 - HTTP server (axum) reusing `lqm-core`. Powers the Dioxus web UI.
 - Qdrant remains the source of truth; core enforces consistent chunking/metadata
   so web UI and agents see the same high-quality data.
@@ -263,7 +268,7 @@ attach their own metadata without breaking existing filters.
 - `ingest_many(texts: Vec<String>, metadatas: Vec<Json>)` — batch-friendly.
 - `search` — vector search with payload filters (collection, tags, min_score…).
 - `list_collections`
-- `collection_info`
+- `get_collection_info` (implemented; older drafts said `collection_info`)
 - Admin tools (create/delete collection, reindex) as needed.
 
 **Design tools for batching** so agents prefer batch calls over one-by-one.
@@ -413,8 +418,8 @@ customizable filtering.
 
 **M2 — MCP binary (stdio) with turbomcp**
 - `#[server]` + `#[tool]` for `ingest_path`, `ingest_text`, `ingest_many`,
-  `search`, `list_collections`, `collection_info`.
-- Integration tests via `channel` + `McpTestClient`.
+  `search`, `list_collections`, `get_collection_info`.
+- Integration tests via `channel` + `McpTestClient` (planned; live Qdrant smokes exist).
 - Wire into an agent host and validate end-to-end.
 
 **M3 — Dual mode**
@@ -435,7 +440,7 @@ customizable filtering.
 **M7 — Ollama + alternative embedders**
 - Ollama adapter; evaluate additional Rust embedders as optional features.
 
-**M8 — Web frontend (future / nice-to-have)**
+**M8 — HTTP API + static UI (shipped); Dioxus SPA still backlog**
 - `lqm-api` (axum) reusing core; Dioxus web UI.
 
 ---
@@ -452,7 +457,7 @@ customizable filtering.
    concurrency are user-customizable.
 5. **Filtering:** exact rules TBD; prioritize customizability, no hard-coding.
 6. **MCP SDK:** must use `turbomcp` (Epistates/turbomcp).
-7. **Frontend:** Dioxus, future nice-to-have; MCP server is the priority now.
+7. **Frontend:** Minimal static UI shipped; Dioxus SPA remains nice-to-have. MCP + REST remain the priority for agents.
 8. **Process:** regular audits for duplication/coupling/decomposition; add unit +
    integration tests as features land.
 9. **Docs to maintain:** `docs/ARCHITECTURE.md`, per-crate `ARCHITECTURE.md`,

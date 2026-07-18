@@ -1,14 +1,19 @@
 # lqm-ingest
 
-Source extractors that turn files/streams into `DocumentChunk`s.
+Source extractors that turn files and remote responses into raw text (callers
+then chunk via `RagCore::expand_to_chunks`).
 
 ## Architecture
 
 ```
-Extractor trait
-├── TextExtractor   (txt, md, rs, py, js, ...)
-├── PdfExtractor    (pdf — behind "pdf" feature)
-└── AudioExtractor  (mp3, wav, flac, ogg, ... — placeholder)
+Extractor trait  →  extract_text(path) → String
+├── TextExtractor   (txt, md, rs, py, js, …)
+├── PdfExtractor    (pdf — feature "pdf")
+└── AudioExtractor  (audio — source_type=audio_placeholder until transcription)
+
+url.rs (always: pure HTML helpers; network behind feature "fetch-url")
+├── html_to_text / extract_html_title / extract_response_text
+└── fetch_url  (reqwest; default-on feature)
 ```
 
 ## Trait
@@ -21,21 +26,23 @@ pub trait Extractor: Send + Sync {
 }
 ```
 
+The trait returns **text**, not chunks, by design: chunk strategy lives in
+`lqm-core` so MCP/HTTP/CLI cannot diverge. Callers must use `expand_to_chunks`.
+
 ## Public API
 
-- `all_extractors()` — returns all registered extractors
-- `find_extractor(path, extractors)` — matches by file extension
-- `extract_file(path, base_payload)` — one-shot extraction producing `DocumentChunk`s
-- `html_to_text(html)` — pure HTML → plain text (scripts/styles stripped)
-- `extract_response_text(content_type, body)` — content-type aware extract (`webpage` vs `url`)
-- `fetch_url(url, timeout)` — HTTP(S) GET + extract → `FetchedDocument`
+- `all_extractors` / `find_extractor` / `extract_file` / `extension_lower`
+- `html_to_text`, `extract_html_title`, `extract_response_text`
+- `fetch_url` — gated on `fetch-url` (default feature)
 
 ## Features
 
-- `pdf` — enables `pdf-extract` crate for PDF text extraction
+| Feature | Default | Effect |
+|---------|---------|--------|
+| `fetch-url` | on | reqwest + `fetch_url` |
+| `pdf` | off | pdf-extract + `PdfExtractor` (MCP/API enable it) |
 
-## URL ingestion
+## Audio
 
-`url.rs` keeps network I/O (`fetch_url` via reqwest) separate from pure extractors so unit tests
-cover HTML fixtures without a network. MCP `ingest_url` calls `fetch_url` then the shared
-chunk → embed → upsert path in `RagCore`.
+Audio extractors write a **placeholder** string and `source_type=audio_placeholder`
+so agents can filter stubs until real transcription ships (ROADMAP P5).

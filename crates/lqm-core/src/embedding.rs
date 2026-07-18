@@ -1,3 +1,8 @@
+//! Pluggable embedding backends (`Embedder` trait) and response parsers.
+//!
+//! Backends: `FakeEmbedder` (tests), optional FastEmbed / Ollama / OpenAI
+//! behind cargo features. Pure JSON parsers are always available for offline tests.
+
 use async_trait::async_trait;
 use std::fmt;
 
@@ -91,7 +96,7 @@ impl FastEmbedder {
             }
         };
         let text_embedding = TextEmbedding::try_new(InitOptions::new(model))?;
-        let dim = 384;
+        let dim = crate::constants::DEFAULT_FASTEMBED_DIM;
         Ok(Self {
             model: std::sync::Mutex::new(text_embedding),
             model_name: model_name.to_string(),
@@ -148,6 +153,23 @@ impl OllamaEmbedder {
     }
 }
 
+/// Parse Ollama `/api/embed` JSON into embedding vectors (testable offline).
+pub fn parse_ollama_embeddings(json: &serde_json::Value) -> Result<Vec<Vec<f32>>, EmbedError> {
+    let embeddings: Vec<Vec<f32>> = json["embeddings"]
+        .as_array()
+        .ok_or_else(|| EmbedError::EmbeddingFailed("ollama response missing 'embeddings'".into()))?
+        .iter()
+        .map(|v| {
+            v.as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .map(|x| x.as_f64().unwrap_or(0.0) as f32)
+                .collect()
+        })
+        .collect();
+    Ok(embeddings)
+}
+
 #[cfg(feature = "embed-ollama")]
 #[async_trait]
 impl Embedder for OllamaEmbedder {
@@ -167,21 +189,7 @@ impl Embedder for OllamaEmbedder {
         let json: serde_json::Value = resp.json().await.map_err(|e| {
             EmbedError::EmbeddingFailed(format!("ollama response parse failed: {}", e))
         })?;
-        let embeddings: Vec<Vec<f32>> = json["embeddings"]
-            .as_array()
-            .ok_or_else(|| {
-                EmbedError::EmbeddingFailed("ollama response missing 'embeddings'".into())
-            })?
-            .iter()
-            .map(|v| {
-                v.as_array()
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .map(|x| x.as_f64().unwrap_or(0.0) as f32)
-                    .collect()
-            })
-            .collect();
-        Ok(embeddings)
+        parse_ollama_embeddings(&json)
     }
 
     fn dimension(&self) -> usize {
@@ -220,6 +228,24 @@ impl OpenAIEmbedder {
     }
 }
 
+/// Parse OpenAI `/embeddings` JSON into embedding vectors (testable offline).
+pub fn parse_openai_embeddings(json: &serde_json::Value) -> Result<Vec<Vec<f32>>, EmbedError> {
+    let embeddings: Vec<Vec<f32>> = json["data"]
+        .as_array()
+        .ok_or_else(|| EmbedError::EmbeddingFailed("openai response missing 'data'".into()))?
+        .iter()
+        .map(|item| {
+            item["embedding"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .map(|x| x.as_f64().unwrap_or(0.0) as f32)
+                .collect()
+        })
+        .collect();
+    Ok(embeddings)
+}
+
 #[cfg(feature = "embed-openai")]
 #[async_trait]
 impl Embedder for OpenAIEmbedder {
@@ -240,20 +266,7 @@ impl Embedder for OpenAIEmbedder {
         let json: serde_json::Value = resp.json().await.map_err(|e| {
             EmbedError::EmbeddingFailed(format!("openai response parse failed: {}", e))
         })?;
-        let embeddings: Vec<Vec<f32>> = json["data"]
-            .as_array()
-            .ok_or_else(|| EmbedError::EmbeddingFailed("openai response missing 'data'".into()))?
-            .iter()
-            .map(|item| {
-                item["embedding"]
-                    .as_array()
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .map(|x| x.as_f64().unwrap_or(0.0) as f32)
-                    .collect()
-            })
-            .collect();
-        Ok(embeddings)
+        parse_openai_embeddings(&json)
     }
 
     fn dimension(&self) -> usize {
@@ -273,28 +286,25 @@ impl Embedder for OpenAIEmbedder {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_fake_embedder() {
+    #[tokio::test]
+    async fn test_fake_embedder() {
         let embedder = FakeEmbedder::new(128);
         assert_eq!(embedder.dimension(), 128);
         assert_eq!(embedder.id(), "fake");
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(embedder.embed_batch(vec!["hello".to_string()]));
-        assert!(result.is_ok());
-        let embeddings = result.unwrap();
+        let embeddings = embedder
+            .embed_batch(vec!["hello".to_string()])
+            .await
+            .expect("fake embed");
         assert_eq!(embeddings.len(), 1);
         assert_eq!(embeddings[0].len(), 128);
         assert!(embeddings[0].iter().all(|&x| x == 0.0));
     }
 
-    #[test]
-    fn test_fake_embedder_batch() {
+    #[tokio::test]
+    async fn test_fake_embedder_batch() {
         let embedder = FakeEmbedder::new(64);
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let texts: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
-        let result = rt.block_on(embedder.embed_batch(texts));
-        assert!(result.is_ok());
-        let embeddings = result.unwrap();
+        let embeddings = embedder.embed_batch(texts).await.expect("fake batch");
         assert_eq!(embeddings.len(), 3);
         for emb in embeddings {
             assert_eq!(emb.len(), 64);
@@ -306,5 +316,36 @@ mod tests {
     fn test_embed_error_display() {
         let err = EmbedError::EmbeddingFailed("test error".to_string());
         assert!(err.to_string().contains("test error"));
+    }
+
+    /// Offline parse tests for remote embedder response shapes (no HTTP).
+    #[test]
+    fn parse_ollama_embeddings_happy_and_missing() {
+        let ok = serde_json::json!({
+            "embeddings": [[0.1, 0.2], [0.3, 0.4, 0.5]]
+        });
+        let vecs = parse_ollama_embeddings(&ok).expect("parse");
+        assert_eq!(vecs.len(), 2);
+        assert_eq!(vecs[0], vec![0.1, 0.2]);
+        assert_eq!(vecs[1].len(), 3);
+
+        let bad = serde_json::json!({ "data": [] });
+        assert!(parse_ollama_embeddings(&bad).is_err());
+    }
+
+    #[test]
+    fn parse_openai_embeddings_happy_and_missing() {
+        let ok = serde_json::json!({
+            "data": [
+                { "embedding": [1.0, 2.0] },
+                { "embedding": [3.0] }
+            ]
+        });
+        let vecs = parse_openai_embeddings(&ok).expect("parse");
+        assert_eq!(vecs.len(), 2);
+        assert_eq!(vecs[0], vec![1.0, 2.0]);
+
+        let bad = serde_json::json!({ "embeddings": [] });
+        assert!(parse_openai_embeddings(&bad).is_err());
     }
 }

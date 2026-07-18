@@ -25,7 +25,7 @@ re-indexing queues, multi-user auth, or horizontal scaling.
 **Date:** 2026-07-13
 
 **What:** A Cargo workspace with separate crates for core, ingestion, MCP, CLI,
-and (future) API. Multiple crate-specific `ARCHITECTURE.md` files.
+and API. Multiple crate-specific `ARCHITECTURE.md` files.
 
 **Why:** Enforces loose coupling and makes it trivial to add new embedders,
 source types, or transports behind features. Matches the project guidelines
@@ -81,8 +81,8 @@ extraction with no C dependencies.
   changes. PDF fits naturally — just another `supported_extensions()` entry.
 - `pdf-extract` is pure Rust, no system deps, matches the "runs anywhere" goal.
 - Behind a cargo feature so users who don't need PDF don't pay the compile cost.
-- Audio files follow the same pattern (metadata-only placeholder, transcription
-  behind a future feature).
+- Audio files follow the same pattern: metadata-only stub with
+  `source_type=audio_placeholder` until transcription ships.
 
 ---
 
@@ -126,16 +126,15 @@ management. Includes a dark-mode static HTML search UI.
 
 **Date:** 2026-07-13
 
-**What:** The default embedding backend is `fake` (zero-value vectors). This is
-safe for testing but produces garbage results in production. The `create_embedder`
-factory emits a loud stderr warning when a `fake` backend is selected outside
-of test configuration.
+**What:** `lqm-core` defaults `EMBEDDING_BACKEND` to `fastembed` in constants,
+but the core crate’s default *features* are empty (no fastembed). MCP and API
+enable `embed-fastembed` so production binaries get a real local model. Selecting
+`fake` still logs a loud warning via `create_embedder`.
 
 **Why:**
-- Prevents silent failures where a user forgets to configure an embedder.
-- Tests use `fake` intentionally — no warning needed in `#[cfg(test)]`.
-- Production paths (MCP server, CLI, API) all trigger the warning unless a real
-  backend is explicitly configured via TOML file or env vars.
+- Library consumers pay for fastembed only when they enable the feature.
+- MCP/API must not silently store zero vectors — feature wiring is intentional
+  (documented in `lqm-mcp/Cargo.toml`).
 
 ---
 
@@ -214,5 +213,39 @@ accept `scope` and `max_clearance`. Upsert defaults missing clearance to
 
 **Revisit if:** true multi-tenant ACLs or host-issued capability tokens are
 required.
+
+---
+
+## 014 — Shared expand_to_chunks for MCP / HTTP / CLI parity
+
+**Date:** 2026-07-18
+
+**What:** Structure-aware document expansion lives only on `RagCore::expand_to_chunks`.
+MCP, HTTP `POST /api/ingest*`, and CLI `ingest` all call it before
+`embed_and_upsert_batch`. Extractors still return raw text (not chunks).
+
+**Why:**
+- Audit AP3–AP5: duplicated expand helpers and raw single-chunk HTTP/CLI ingest
+  produced different search quality depending on surface.
+- One implementation keeps markdown/code/plain boundaries identical.
+- Avoids coupling `Extractor` to `ChunkConfig` (OC5 deferred redesign).
+
+**Revisit if:** extractors need stream/async chunk production with per-format
+config that cannot live on RagCore.
+
+---
+
+## 015 — RagCore::from_env factory for binaries
+
+**Date:** 2026-07-18
+
+**What:** `RagCore::from_env(qdrant_url?, config_path?)` loads embedder config,
+creates the embedder, connects Qdrant (with `list_collections` health check),
+and applies `RagConfig::default()`.
+
+**Why:**
+- Eliminated triple-copy construction in MCP/CLI/API (audit DP1).
+- Centralizes `QDRANT_URL` / default URL resolution.
+- Explicit CLI/API flags still override URL when provided.
 
 ---

@@ -22,6 +22,10 @@ docs/
   ROADMAP.md       ← shipped / next / backlog
   DECISIONS.md     ← why we chose what we chose
   AUDIT.md         ← audit findings and fix status
+  AGENTS.md        ← MCP↔HTTP tool matrix for host agents
+
+liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md
+                   ← gap map vs AnythingLLM knowledge/MCP layer
 
 crates/
   lqm-core/        ← core library: types, Embedder trait, Qdrant client,

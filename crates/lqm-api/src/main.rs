@@ -7,14 +7,14 @@ use axum::{
     routing::{delete, get, post},
 };
 use clap::Parser;
-use lqm_core::config::{EmbedderConfig, create_embedder};
+use lqm_core::constants;
 use lqm_core::format_relevant_context_with;
 use lqm_core::structured_error;
 use lqm_core::types::{
-    ContextOptions, DEFAULT_COLLECTION_NAME, DocumentChunk, PayloadFilter, RagConfig, SearchFilter,
-    SearchOptions,
+    ContextOptions, DocumentChunk, PayloadFilter, SearchFilter, SearchOptions, make_file_result,
+    resolve_collection, unix_now_secs_str,
 };
-use lqm_core::{DEFAULT_MEMORY_COLLECTION, MemoryNote, QdrantClient, RagCore};
+use lqm_core::{DEFAULT_MEMORY_COLLECTION, MemoryNote, RagCore};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -182,40 +182,22 @@ fn expand_chunks(
     scope: Option<String>,
     clearance: Option<String>,
 ) -> Vec<DocumentChunk> {
-    let pieces = core.chunk_for_ingest(
+    core.expand_to_chunks(
         text,
-        source_type.as_deref(),
-        path_hint.or(source.as_deref()),
-    );
-    let total = pieces.len();
-    pieces
-        .into_iter()
-        .enumerate()
-        .map(|(i, text)| DocumentChunk {
-            text,
-            source: source.clone(),
-            source_type: source_type.clone(),
-            collection: Some(collection.clone()),
-            tags: tags.clone(),
-            timestamp: None,
-            project: project.clone(),
-            last_modified: last_modified.clone(),
-            chunk_index: Some(i),
-            total_chunks: Some(total),
-            importance: None,
-            memory_id: None,
-            scope: scope.clone(),
-            clearance: clearance.clone(),
-        })
-        .collect()
+        source,
+        source_type,
+        collection,
+        tags,
+        project,
+        last_modified,
+        path_hint,
+        scope,
+        clearance,
+    )
 }
 
 fn timestamp_now() -> String {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .to_string()
+    unix_now_secs_str()
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -302,10 +284,7 @@ async fn get_relevant_context(
     State(state): State<AppState>,
     Json(body): Json<ContextBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let coll = body
-        .collection
-        .clone()
-        .unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+    let coll = resolve_collection(body.collection.clone());
     let page = state
         .core
         .search_page(
@@ -362,36 +341,42 @@ async fn ingest(
     State(state): State<AppState>,
     Json(body): Json<IngestBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let collection = body
-        .collection
-        .unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
-
-    let chunk = DocumentChunk {
-        text: body.text,
-        source: Some(body.source.unwrap_or_else(|| "api-ingest".to_string())),
-        source_type: Some(body.source_type.unwrap_or_else(|| "text".to_string())),
-        collection: Some(collection.clone()),
-        tags: Some(body.tags.unwrap_or_default()),
-        timestamp: Some(timestamp_now()),
-        project: body.project,
-        last_modified: body.last_modified.map(|ts| ts.to_string()),
-        chunk_index: Some(0),
-        total_chunks: Some(1),
-        importance: None,
-        memory_id: None,
-        scope: body.scope,
-        clearance: body.clearance,
-    };
+    let collection = resolve_collection(body.collection);
+    let source = Some(
+        body.source
+            .unwrap_or_else(|| constants::DEFAULT_API_INGEST_SOURCE.to_string()),
+    );
+    let source_type = Some(
+        body.source_type
+            .unwrap_or_else(|| constants::SOURCE_TYPE_TEXT.to_string()),
+    );
+    let mut chunks = expand_chunks(
+        &state.core,
+        &body.text,
+        source,
+        source_type,
+        collection.clone(),
+        Some(body.tags.unwrap_or_default()),
+        body.project,
+        body.last_modified.map(|ts| ts.to_string()),
+        None,
+        body.scope,
+        body.clearance,
+    );
+    let ts = timestamp_now();
+    for c in &mut chunks {
+        c.timestamp = Some(ts.clone());
+    }
 
     state
         .core
-        .ensure_collection(&collection, state.embed_dimension)
+        .ensure_collection(&collection, None)
         .await
         .map_err(map_lqm_err)?;
 
     let report = state
         .core
-        .embed_and_upsert_batch(vec![chunk])
+        .embed_and_upsert_batch(chunks)
         .await
         .map_err(map_lqm_err)?;
 
@@ -536,12 +521,10 @@ async fn ingest_path(
     State(state): State<AppState>,
     Json(body): Json<IngestPathBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let collection = body
-        .collection
-        .unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+    let collection = resolve_collection(body.collection);
     state
         .core
-        .ensure_collection(&collection, state.embed_dimension)
+        .ensure_collection(&collection, None)
         .await
         .map_err(map_lqm_err)?;
 
@@ -604,14 +587,11 @@ async fn ingest_path(
                     all_chunks.extend(pieces);
                 }
                 ok_files += 1;
-                file_results.push(serde_json::json!({
-                    "path": display, "ok": true, "error": null, "chunks": n
-                }));
+                file_results.push(make_file_result(&display, true, None, n));
             }
             Err(e) => {
-                file_results.push(serde_json::json!({
-                    "path": display, "ok": false, "error": e.to_string(), "chunks": 0
-                }));
+                let err = e.to_string();
+                file_results.push(make_file_result(&display, false, Some(&err), 0));
             }
         }
     }
@@ -648,12 +628,10 @@ async fn ingest_url(
     State(state): State<AppState>,
     Json(body): Json<IngestUrlBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let collection = body
-        .collection
-        .unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+    let collection = resolve_collection(body.collection);
     state
         .core
-        .ensure_collection(&collection, state.embed_dimension)
+        .ensure_collection(&collection, None)
         .await
         .map_err(map_lqm_err)?;
 
@@ -716,12 +694,10 @@ async fn ingest_many(
     State(state): State<AppState>,
     Json(body): Json<IngestManyBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let collection = body
-        .collection
-        .unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+    let collection = resolve_collection(body.collection);
     state
         .core
-        .ensure_collection(&collection, state.embed_dimension)
+        .ensure_collection(&collection, None)
         .await
         .map_err(map_lqm_err)?;
 
@@ -735,7 +711,7 @@ async fn ingest_many(
                 &state.core,
                 &text,
                 Some(src.clone()),
-                Some("text".into()),
+                Some(constants::SOURCE_TYPE_TEXT.into()),
                 collection.clone(),
                 body.tags.clone(),
                 body.project.clone(),
@@ -746,9 +722,7 @@ async fn ingest_many(
             );
             let n = pieces.len();
             all_chunks.extend(pieces);
-            file_results.push(serde_json::json!({
-                "path": src, "ok": true, "error": null, "chunks": n
-            }));
+            file_results.push(make_file_result(&src, true, None, n));
         }
     }
 
@@ -774,14 +748,11 @@ async fn ingest_many(
                         n += pieces.len();
                         all_chunks.extend(pieces);
                     }
-                    file_results.push(serde_json::json!({
-                        "path": path, "ok": true, "error": null, "chunks": n
-                    }));
+                    file_results.push(make_file_result(&path, true, None, n));
                 }
                 Err(e) => {
-                    file_results.push(serde_json::json!({
-                        "path": path, "ok": false, "error": e.to_string(), "chunks": 0
-                    }));
+                    let err = e.to_string();
+                    file_results.push(make_file_result(&path, false, Some(&err), 0));
                 }
             }
         }
@@ -806,14 +777,18 @@ async fn ingest_many(
                     );
                     let n = pieces.len();
                     all_chunks.extend(pieces);
-                    file_results.push(serde_json::json!({
-                        "path": url, "ok": true, "error": null, "chunks": n, "title": fetched.title
-                    }));
+                    let mut row = make_file_result(&url, true, None, n);
+                    if let Some(obj) = row.as_object_mut() {
+                        obj.insert(
+                            "title".into(),
+                            serde_json::to_value(fetched.title).unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                    file_results.push(row);
                 }
                 Err(e) => {
-                    file_results.push(serde_json::json!({
-                        "path": url, "ok": false, "error": e.to_string(), "chunks": 0
-                    }));
+                    let err = e.to_string();
+                    file_results.push(make_file_result(&url, false, Some(&err), 0));
                 }
             }
         }
@@ -1027,7 +1002,7 @@ fn qdrant_url(cli: &Cli) -> String {
     cli.qdrant_url
         .clone()
         .or_else(|| std::env::var("QDRANT_URL").ok())
-        .unwrap_or_else(|| "http://localhost:6334".to_string())
+        .unwrap_or_else(|| constants::DEFAULT_QDRANT_URL.to_string())
 }
 
 #[tokio::main]
@@ -1036,14 +1011,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     let url = qdrant_url(&cli);
-    let qdrant = QdrantClient::new(&url).await?;
+    let core = RagCore::from_env(Some(&url), cli.config.as_deref()).await?;
+    log::info!(
+        "Embedder: {} (dim={})",
+        core.embedder.id(),
+        core.embedder.dimension()
+    );
 
-    let embedder_config = EmbedderConfig::load_or_default(cli.config.as_deref())?;
-    let embedder = create_embedder(&embedder_config)?;
-    log::info!("Embedder: {} (dim={})", embedder.id(), embedder.dimension());
-
-    let dim = embedder.dimension();
-    let core = RagCore::from_config(qdrant, embedder, &RagConfig::default());
+    let dim = core.embedder.dimension();
     let api_token = std::env::var("LQM_API_TOKEN")
         .ok()
         .map(|s| s.trim().to_string())

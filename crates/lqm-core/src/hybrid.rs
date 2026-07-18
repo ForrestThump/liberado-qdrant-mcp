@@ -5,6 +5,7 @@
 //! scores so agents get both semantic and lexical relevance without a second
 //! vector index or Qdrant sparse schema.
 
+use crate::constants;
 use crate::types::SearchResult;
 use std::collections::HashMap;
 
@@ -59,12 +60,11 @@ pub fn keyword_score(text: &str, query_tokens: &[String]) -> f32 {
         .count();
     let mut score = hits as f32 / unique_q.len() as f32;
 
-    // Phrase / substring bonus when the whole query (collapsed) appears.
     let q_joined: String = query_tokens.join(" ");
     if !q_joined.is_empty() {
         let hay = text.to_ascii_lowercase();
         if hay.contains(&q_joined) {
-            score = (score + 0.25).min(1.0);
+            score = (score + constants::KEYWORD_PHRASE_BONUS).min(1.0);
         }
     }
     score.clamp(0.0, 1.0)
@@ -144,8 +144,8 @@ pub fn fuse_dense_keyword(
             let weighted = alpha * dense_norm[i] + (1.0 - alpha) * kw_norm[i];
             let rrf = alpha * rrf_contribution(i, rrf_k)
                 + (1.0 - alpha) * rrf_contribution(kw_rank[i], rrf_k);
-            // Blend weighted + RRF so ties in dense still separate via keyword ranks.
-            let score = 0.5 * weighted + 0.5 * rrf;
+            let score =
+                constants::HYBRID_FUSE_WEIGHTED * weighted + constants::HYBRID_FUSE_RRF * rrf;
             (i, score)
         })
         .collect();

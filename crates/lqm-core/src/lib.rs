@@ -1,11 +1,12 @@
+//! `lqm-core` — types, chunking, embedding, Qdrant client, and search helpers.
+//!
+//! Zero MCP/HTTP framework dependencies. Binaries (`lqm-mcp`, `lqm-cli`, `lqm-api`)
+//! and `lqm-ingest` depend on this crate.
+
 pub mod api_error;
 pub mod chunking;
-
-pub use chunking::{
-    ChunkKind, ChunkingStrategy, chunk_code, chunk_for_ingest, chunk_kind_for, chunk_markdown,
-    chunk_text,
-};
 pub mod config;
+pub mod constants;
 pub mod context;
 pub mod embedding;
 pub mod error;
@@ -14,9 +15,15 @@ pub mod lifecycle;
 pub mod memory;
 pub mod qdrant;
 pub mod scope;
+pub mod source_type;
 pub mod types;
 
 pub use api_error::{StructuredError, error_code, http_status, structured_error};
+pub use chunking::{
+    ChunkKind, ChunkingStrategy, chunk_code, chunk_for_ingest, chunk_kind_for, chunk_markdown,
+    chunk_text,
+};
+pub use constants::*;
 pub use context::{
     ContextSource, FormattedContext, format_relevant_context, format_relevant_context_with,
     mmr_rerank,
@@ -37,7 +44,9 @@ pub use scope::{
     CLEARANCE_LEVELS, DEFAULT_CLEARANCE, allowed_clearance_levels, clearance_allowed,
     clearance_rank, normalize_clearance, point_in_scope, scope_matches,
 };
+pub use source_type::{SourceType, UnknownSourceType};
 pub use types::{
     ContextOptions, DEFAULT_COLLECTION_NAME, EmbedderInfo, IngestReport, PayloadFilter,
-    ReingestAction, SearchFilter, SearchOptions, SearchPage, SourceSummary, payload_schema,
+    ReingestAction, SearchFilter, SearchOptions, SearchPage, SourceSummary, make_file_result,
+    payload_schema, payload_str, resolve_collection, unix_now_secs, unix_now_secs_str,
 };

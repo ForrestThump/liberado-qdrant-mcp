@@ -20,8 +20,11 @@ if ops-useful) in the same change. Live smoke against Qdrant for every new tool.
 | Document lifecycle (list/delete/replace) | Broad SaaS connectors (Notion, etc.) before lifecycle is solid |
 | MCP + HTTP API parity over `RagCore` | Competing on product shell |
 
-Rough progress as a **headless agent KB** (post Phase 1): ~55–60%. Phase 2A–2B
-targets ~80%+ of the AnythingLLM agent knowledge path without product surface.
+Rough progress as a **headless agent KB** (P0–P4 + hybrid/scope shipped):
+~**80–85%** of the AnythingLLM *agent knowledge/retrieval* path without product
+surface. Remaining: scale (sparse hybrid), audio transcription, offline MCP
+tests, optional SPA/connectors. See
+[`liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md`](../liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md).
 
 ---
 
@@ -35,7 +38,7 @@ targets ~80%+ of the AnythingLLM agent knowledge path without product surface.
 - **M3 — Dual mode** (stdio + streamable HTTP via `lqm-mcp serve`)
 - **M4 — CLI + benchmarking** (ingest/list/delete/bench, file walker, mtime)
 - **M5 — Hash + indexes** (SHA256 `ingest_hash` stored, auto payload indexes, `last_modified`)
-- **M6 — More mediums** (PDF behind `pdf` feature, audio placeholder, extension detection)
+- **M6 — More mediums** (PDF behind `pdf` feature, audio as `audio_placeholder`, extension detection)
 - **M7 — Ollama + OpenAI embedders** (feature-gated, TOML + env, factory)
 - **M8 — HTTP API + simple UI** (axum REST, dark-mode search page)
 
@@ -152,7 +155,7 @@ Within a band, list order is the suggested implementation sequence.
 - [x] **Agent docs** — `docs/AGENTS.md` tool matrix, search vs context, stdio/`serve`
 - [x] **HTTP bearer** — optional `LQM_API_TOKEN` → `Authorization: Bearer …` on `/api/*`
 - [x] **CI:** optional `live-qdrant` job with Qdrant service + `LQM_LIVE=1` smokes
-- [ ] Mock HTTP tests for Ollama/OpenAI embedders (deferred — lower urgency)
+- [x] Offline embedder response parsers (`parse_ollama_embeddings` / `parse_openai_embeddings`) unit-tested (full wiremock HTTP still optional)
 
 **Done when:** every MCP capability has an HTTP equivalent and docs teach the tool set. ✅
 
@@ -196,12 +199,14 @@ Within a band, list order is the suggested implementation sequence.
 
 ### Still backlog (not shipped)
 
-- Audio transcription (whisper-rs) — replace audio placeholder
+- Audio transcription (whisper-rs) — replace `audio_placeholder` stubs
 - Dioxus richer SPA (MCP + API remain priority over UI)
 - WASM build of core for browser-side use
 - Chat-with-context tool (only if a host cannot generate itself)
 - Background re-index workers / heavy queues
-- Native Qdrant sparse vectors (optional upgrade; current hybrid is post-query fusion over dense + text)
+- Native Qdrant sparse vectors (optional upgrade; current hybrid is post-query fusion over dense + text; keyword path is O(n) scroll)
+- Channel-transport + `McpTestClient` offline MCP integration tests
+- Full HTTP router integration tests (`tower::ServiceExt`)
 
 ### Scoped filtering (shipped)
 
@@ -227,11 +232,12 @@ Do not prioritize these while P0–P3 are open:
 
 ## Suggested next milestone (single PR stack)
 
-Ship **P0** as one coherent slice:
+**P0–P4 (and part of P5) are shipped.** Prefer a single coherent slice from remaining
+backlog rather than re-doing early milestones:
 
-1. Core scroll/filter + `list_sources` / `delete_by_source` (+ filter delete)
-2. Ingest skip/replace-by-source using `ingest_hash`
-3. MCP + API wiring + live smoke extensions
+1. Channel-transport MCP integration tests (`McpTestClient`) without live Qdrant
+2. Sparse / keyword index for hybrid search (replace full collection scroll at scale)
+3. Real audio transcription (replace `audio_placeholder` stubs)
 
-Then **P1** filters/offset/context budget, then **P2** chunking/reports, then **P3** parity/docs.
+Or pick the highest-value remaining P5 item for your deployment (Dioxus SPA, connectors).
 )

@@ -5,6 +5,52 @@
 //! - `chunk_code` — split on common def/fn/class boundaries, then size-limit
 //! - `chunk_for_ingest` — pick strategy from source_type / path extension
 
+use crate::constants;
+
+/// File extensions treated as markdown content.
+pub const MARKDOWN_EXTS: &[&str] = &["md", "mdx", "markdown", "rmd", "org"];
+
+/// File extensions treated as code content.
+pub const CODE_EXTS: &[&str] = &[
+    "rs", "py", "js", "ts", "tsx", "jsx", "go", "java", "c", "cpp", "h", "hpp", "rb", "cs", "kt",
+    "swift", "scala", "php", "lua", "zig",
+];
+
+/// Line prefixes that signal a code-block boundary (checked lowercased).
+pub const CODE_BOUNDARY_PREFIXES: &[&str] = &[
+    "fn ",
+    "pub fn ",
+    "pub(crate) fn ",
+    "async fn ",
+    "pub async fn ",
+    "impl ",
+    "struct ",
+    "pub struct ",
+    "enum ",
+    "pub enum ",
+    "trait ",
+    "pub trait ",
+    "mod ",
+    "pub mod ",
+    "func ",
+    "def ",
+    "async def ",
+    "class ",
+    "function ",
+    "export function ",
+    "export default function ",
+    "export class ",
+    "export const ",
+    "export async function ",
+    "public class ",
+    "private class ",
+    "protected class ",
+    "public interface ",
+    "public static ",
+    "public void ",
+    "public async ",
+];
+
 #[derive(Debug, Clone)]
 pub struct ChunkingStrategy {
     pub chunk_size: usize,
@@ -48,43 +94,14 @@ pub fn chunk_kind_for(source_type: Option<&str>, path_hint: Option<&str>) -> Chu
 
     let st = source_type.unwrap_or("").to_ascii_lowercase();
 
-    if st == "markdown"
-        || ext == "md"
-        || ext == "mdx"
-        || ext == "markdown"
-        || ext == "rmd"
-        || ext == "org"
-    {
+    if st == crate::constants::SOURCE_TYPE_MARKDOWN || MARKDOWN_EXTS.contains(&ext.as_str()) {
         return ChunkKind::Markdown;
     }
 
-    if matches!(
-        ext.as_str(),
-        "rs" | "py"
-            | "js"
-            | "ts"
-            | "tsx"
-            | "jsx"
-            | "go"
-            | "java"
-            | "c"
-            | "cpp"
-            | "h"
-            | "hpp"
-            | "rb"
-            | "cs"
-            | "kt"
-            | "swift"
-            | "scala"
-            | "php"
-            | "lua"
-            | "zig"
-    ) || st == "code"
-    {
+    if CODE_EXTS.contains(&ext.as_str()) || st == crate::constants::SOURCE_TYPE_CODE {
         return ChunkKind::Code;
     }
 
-    // Plain text extractor labels code-ish files as "text" — extension still wins above.
     ChunkKind::Plain
 }
 
@@ -200,6 +217,11 @@ pub fn chunk_code(text: &str, strategy: &ChunkingStrategy) -> Vec<String> {
     out
 }
 
+/// Detect ATX headings (`# Title` with space/tab after 1–6 hashes).
+///
+/// Closing hashes (`## Title ##`) are allowed by CommonMark and are still detected
+/// as headings here because we only require whitespace after the opening run.
+/// Lines like `##NoSpace` are not headings.
 fn is_atx_heading(line: &str) -> bool {
     let t = line.trim_start();
     if !t.starts_with('#') {
@@ -219,46 +241,12 @@ fn is_code_boundary(line: &str) -> bool {
     if t.is_empty() {
         return false;
     }
-    // Comments are not boundaries (except shebang as file start, which is fine as first block).
     if t.starts_with("//") || (t.starts_with('#') && !t.starts_with("#!") && !t.starts_with("#[")) {
         return false;
     }
 
     let lower = t.to_ascii_lowercase();
-    let prefixes = [
-        "fn ",
-        "pub fn ",
-        "pub(crate) fn ",
-        "async fn ",
-        "pub async fn ",
-        "impl ",
-        "struct ",
-        "pub struct ",
-        "enum ",
-        "pub enum ",
-        "trait ",
-        "pub trait ",
-        "mod ",
-        "pub mod ",
-        "func ",
-        "def ",
-        "async def ",
-        "class ",
-        "function ",
-        "export function ",
-        "export default function ",
-        "export class ",
-        "export const ",
-        "export async function ",
-        "public class ",
-        "private class ",
-        "protected class ",
-        "public interface ",
-        "public static ",
-        "public void ",
-        "public async ",
-    ];
-    prefixes.iter().any(|p| lower.starts_with(p))
+    CODE_BOUNDARY_PREFIXES.iter().any(|p| lower.starts_with(p))
 }
 
 fn sliding_window_words(paragraph: &str, strategy: &ChunkingStrategy) -> Vec<String> {
@@ -281,8 +269,9 @@ fn sliding_window_words(paragraph: &str, strategy: &ChunkingStrategy) -> Vec<Str
 
         chunks.push(words[start..end].join(" "));
 
-        let advance = if end - start > strategy.overlap / 5 {
-            end - start - (strategy.overlap / 5).min(end - start - 1)
+        let overlap_words = strategy.overlap / constants::SLIDING_WINDOW_WORD_OVERLAP_DIV;
+        let advance = if end - start > overlap_words {
+            end - start - overlap_words.min(end - start - 1)
         } else {
             1
         };
@@ -317,7 +306,8 @@ fn sliding_window_lines(block: &str, strategy: &ChunkingStrategy) -> Vec<String>
             end = start + 1;
         }
         chunks.push(lines[start..end].join("\n"));
-        let overlap_lines = (strategy.overlap / 40).max(1);
+        let overlap_lines = (strategy.overlap / constants::SLIDING_WINDOW_LINE_OVERLAP_DIV)
+            .max(constants::SLIDING_WINDOW_MIN_OVERLAP_LINES);
         let advance = (end - start).saturating_sub(overlap_lines).max(1);
         start += advance;
     }
@@ -439,5 +429,20 @@ mod tests {
             &strategy,
         );
         assert!(code.len() >= 2);
+    }
+
+    #[test]
+    fn atx_heading_open_and_closed_forms() {
+        assert!(is_atx_heading("## Open form"));
+        // Closed ATX still has space after opening hashes → treated as heading.
+        assert!(is_atx_heading("## Closed form ##"));
+        assert!(!is_atx_heading("##NoSpace"));
+        let strategy = ChunkingStrategy::text(2000, 20);
+        let doc = "## One ##\n\nbody a\n\n## Two\n\nbody b";
+        let chunks = chunk_markdown(doc, &strategy);
+        assert!(
+            chunks.len() >= 2,
+            "closed + open ATX both split: {chunks:?}"
+        );
     }
 }

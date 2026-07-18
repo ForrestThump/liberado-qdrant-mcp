@@ -4,6 +4,7 @@
 //! `fetch_url` performs HTTP GET and reuses those extractors.
 
 use crate::ExtractError;
+use lqm_core::constants;
 use std::time::Duration;
 
 /// Default HTTP timeout for remote fetches (seconds).
@@ -73,13 +74,22 @@ pub fn extract_html_title(html: &str) -> Option<String> {
 pub fn extract_response_text(content_type: Option<&str>, body: &str) -> (String, String) {
     let ct = content_type.unwrap_or("").to_ascii_lowercase();
     if ct.contains("html") || looks_like_html(body) {
-        (html_to_text(body), "webpage".to_string())
+        (
+            html_to_text(body),
+            constants::SOURCE_TYPE_WEBPAGE.to_string(),
+        )
     } else {
-        (collapse_whitespace(body), "url".to_string())
+        (
+            collapse_whitespace(body),
+            constants::SOURCE_TYPE_URL.to_string(),
+        )
     }
 }
 
 /// Fetch a URL and extract usable text. Network I/O only — pure extraction is above.
+///
+/// Requires the `fetch-url` feature (default-on).
+#[cfg(feature = "fetch-url")]
 pub async fn fetch_url(
     url: &str,
     timeout: Option<Duration>,
@@ -175,7 +185,7 @@ fn looks_like_html(body: &str) -> bool {
     let trimmed = body.trim_start();
     let lower: String = trimmed
         .chars()
-        .take(256)
+        .take(constants::HTML_LOOKAHEAD_CHARS)
         .collect::<String>()
         .to_ascii_lowercase();
     lower.starts_with("<!doctype html")
@@ -393,11 +403,11 @@ mod tests {
     #[test]
     fn extract_response_text_html_vs_plain() {
         let (html_text, st) = extract_response_text(Some("text/html; charset=utf-8"), "<p>Hi</p>");
-        assert_eq!(st, "webpage");
+        assert_eq!(st, constants::SOURCE_TYPE_WEBPAGE);
         assert!(html_text.contains("Hi"));
 
         let (plain, st2) = extract_response_text(Some("text/plain"), "just text");
-        assert_eq!(st2, "url");
+        assert_eq!(st2, constants::SOURCE_TYPE_URL);
         assert_eq!(plain, "just text");
     }
 
@@ -405,7 +415,7 @@ mod tests {
     fn extract_response_text_heuristic_html() {
         let body = "<!DOCTYPE html><html><body>Page</body></html>";
         let (text, st) = extract_response_text(None, body);
-        assert_eq!(st, "webpage");
+        assert_eq!(st, constants::SOURCE_TYPE_WEBPAGE);
         assert!(text.contains("Page"));
     }
 
@@ -417,6 +427,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "fetch-url")]
     #[tokio::test]
     async fn fetch_url_rejects_empty_and_non_http() {
         let empty = fetch_url("", None).await;
@@ -425,5 +436,16 @@ mod tests {
         assert!(ftp.is_err());
         let file = fetch_url("file:///etc/passwd", None).await;
         assert!(file.is_err());
+    }
+
+    /// Offline happy-path for response extraction (fetch_url network path uses this).
+    #[test]
+    fn extract_response_text_success_fixture() {
+        let html = r#"<!DOCTYPE html><html><head><title>Doc</title></head>
+<body><p>Hello from fixture page for offline validation.</p></body></html>"#;
+        let (text, st) = extract_response_text(Some("text/html"), html);
+        assert_eq!(st, constants::SOURCE_TYPE_WEBPAGE);
+        assert!(text.contains("Hello from fixture"));
+        assert!(text.contains("Doc") || text.contains("Title"));
     }
 }

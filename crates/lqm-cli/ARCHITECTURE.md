@@ -4,27 +4,28 @@ CLI binary for admin tasks, bulk ingestion, and embedder benchmarking.
 
 ## Stack
 
-- **CLI framework:** clap v4 (derive)
-- **Core:** delegates to `lqm-core`
-- **Ingestion:** delegates to `lqm-ingest` extractors
-- **File traversal:** walkdir
+- **CLI:** clap v4
+- **Core:** `RagCore::from_env` (Qdrant + embedder)
+- **Ingestion:** `lqm-ingest` extractors + `RagCore::expand_to_chunks` (same chunking as MCP/API)
+- **Traversal:** workspace `walkdir`
 
 ## Commands
 
 ```
-lqm-cli ingest <path>     Bulk ingest files/dirs into a collection
-  -c, --collection NAME   Target collection (default: DEFAULT_COLLECTION_NAME)
-  --source-type TYPE      Source label override
-  --qdrant-url URL        Qdrant server
-  --config PATH           TOML embedder config
+lqm-cli ingest --path <path>
+  -c, --collection NAME   (default: resolve_collection / "default")
+  --source-type TYPE
+  --qdrant-url URL
+  --config PATH
 
-lqm-cli list              List all collections (pretty JSON)
-lqm-cli delete <name>     Delete a collection
-lqm-cli bench             Benchmark embedders
-  -t, --text TEXT         Text to embed
-  -i, --iterations N      Iterations per backend
+lqm-cli list              List collections (JSON)
+lqm-cli delete --name N   Delete collection
+lqm-cli bench -t TEXT [-i N]   Embedder benchmark
 ```
 
-## Features
+## Notes
 
-- `embed-fastembed` — enables fastembed in benchmark command
+- Ingest ensures the target collection, then structure-aware expands each file
+  (markdown headings / code boundaries / plain windows) before upsert.
+- Unsupported extensions are skipped with a log line.
+- Feature `embed-fastembed` enables fastembed for this binary when desired.

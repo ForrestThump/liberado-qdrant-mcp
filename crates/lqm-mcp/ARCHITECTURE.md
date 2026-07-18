@@ -4,44 +4,49 @@ MCP server binary. Agents talk to this; it delegates all work to `lqm-core`.
 
 ## Stack
 
-- **MCP SDK:** turbomcp v3 (`#[server]`, `#[tool]`)
-- **Transport:** stdio (default) + streamable HTTP (via `serve` subcommand)
+- **MCP SDK:** turbomcp (fork pin in Cargo.toml; `stdio`, `http`, `channel` features)
+- **Transport:** stdio (default) + streamable HTTP (`serve` subcommand)
 - **Runtime:** tokio
-- **CLI:** clap v4 (derive)
+- **CLI:** clap v4 (`env` for `QDRANT_URL` / `LQM_CONFIG`)
+- **Construction:** `RagCore::from_env`
 
 ## Dual-mode
 
 ```
-lqm-mcp              → stdio transport (spawn-on-demand, zero daemon)
-lqm-mcp serve        → HTTP server (persistent, single model in RAM)
-  --host 0.0.0.0     → bind address (default)
-  --port 8080        → port (default)
+lqm-mcp              → stdio transport (spawn-on-demand)
+lqm-mcp serve        → streamable HTTP (persistent, single model in RAM)
+  --host 0.0.0.0
+  --port …
 ```
 
 ## MCP tools
 
 | Tool | Role |
 |------|------|
-| `ingest_text` | Structure-aware chunk → embed/upsert; skip/replace by source; `file_results` |
-| `ingest_path` | Walk file/dir; per-file `file_results`; md/code chunking; PDF enabled |
-| `ingest_url` | Fetch + hardened HTML (title, size cap) → structure-aware chunk/upsert |
-| `ingest_many` | Batch texts/paths/urls with one upsert and per-item results |
-| `search` | Semantic search; filters (source/project/tags must·should·must_not), offset pagination |
-| `get_relevant_context` | Same filters + markdown passages, char budget, optional MMR |
-| `list_collections` | Collection names |
-| `create_collection` | Create/ensure; dim defaults to active embedder |
-| `delete_collection` | Drop collection |
+| `ingest_text` | `expand_to_chunks` → embed/upsert; skip/replace; accounting |
+| `ingest_path` | Walk file/dir; per-file `file_results`; PDF feature on |
+| `ingest_url` | `fetch_url` + structure-aware chunk/upsert |
+| `ingest_many` | Batch texts/paths/urls; one upsert; per-item results |
+| `search` | Dense or hybrid; filters; offset pagination |
+| `get_relevant_context` | Same filters + markdown, char budget, optional MMR |
+| `list_collections` | Names |
+| `create_collection` | Create/ensure; dim defaults to embedder |
+| `delete_collection` | Drop |
 | `get_collection_info` | Points, vector size, distance, status |
-| `list_sources` | Distinct sources + counts in a collection |
-| `delete_by_source` | Remove all points for one source |
-| `delete_by_filter` | Delete by source/source_type/project/tags (AND) |
+| `list_sources` | Distinct sources + counts |
+| `delete_by_source` | Remove one source |
+| `delete_by_filter` | source / source_type / project / tags / scope / clearance |
+| `get_embedder_info` | id, dimension, model |
+| `store_memory` / `recall_memories` | Long-term notes (default collection `memories`) |
 
-Ingest tools return `{ inserted, skipped, replaced, chunks }` for agent accounting.
+Ingest tools return `{ inserted, skipped, replaced, chunks }` (+ `file_results` where multi-item).
 
-All tools parse args and delegate to `RagCore` / `lqm-ingest` — no Qdrant/embed reimplementation in this binary.
+Optional ingest fields: `scope`, `clearance`. Search/context: `scope`, `max_clearance`, `hybrid`, `hybrid_alpha`.
+
+All tools stay thin: parse args → `RagCore` / `lqm-ingest`.
 
 ## Testing
 
-Integration tests use turbomcp's `channel` transport + `McpTestClient`.
-A connectivity check on Qdrant ensures graceful skip when Qdrant is unavailable.
-Pure unit tests for HTML extraction and context formatting live in `lqm-ingest` / `lqm-core`.
+- **Live smokes** against real Qdrant when available (`LQM_LIVE=1` hard-requires).
+- Workspace CI skips when Qdrant is down; optional `live-qdrant` job runs smokes.
+- Channel transport + `McpTestClient` offline suite is **planned** (see ROADMAP / AUDIT TC11), not yet the primary harness.

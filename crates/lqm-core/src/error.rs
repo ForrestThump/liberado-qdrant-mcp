@@ -1,3 +1,5 @@
+//! Top-level `LqmError` enum used across core, MCP, CLI, and API surfaces.
+
 use crate::embedding::EmbedError;
 use crate::qdrant::QdrantError;
 use qdrant_client::QdrantError as QdrantClientError;

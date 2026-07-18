@@ -64,4 +64,16 @@ See **[docs/AGENTS.md](docs/AGENTS.md)** for:
 - Claude Desktop / Cursor / stdio vs `serve` setup
 - Stable Qdrant payload schema
 
-Roadmap and design: [docs/ROADMAP.md](docs/ROADMAP.md), [docs/PLAN.md](docs/PLAN.md).
+| Doc | Contents |
+|-----|----------|
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Shipped phases P0–P5 + backlog |
+| [docs/PLAN.md](docs/PLAN.md) | Design rationale |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Crate graph, data flows, scaling |
+| [docs/AUDIT.md](docs/AUDIT.md) | Maintainability audit dispositions |
+| [AnythingLLM comparison](liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md) | Gaps vs AnythingLLM knowledge/MCP layer (~80–85% headless path) |
+
+### Ingest parity
+
+MCP, HTTP (`POST /api/ingest*`), and CLI `ingest` all use the same
+structure-aware chunking (`RagCore::expand_to_chunks`) so search quality does
+not depend on which surface ingested the document.

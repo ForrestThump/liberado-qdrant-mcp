@@ -6,54 +6,90 @@ High-level system architecture for `liberado-qdrant-mcp`.
 
 ```
                          ┌─────────────┐
-                         │  lqm-core   │  (lib — types, chunking, embedding, qdrant)
+                         │  lqm-core   │  (lib — types, chunking, embedding, RagCore)
                          └──────┬──────┘
-                     ┌──────────┼──────────┐
-                     ▼          ▼          ▼
-              ┌───────────┐ ┌────────┐ ┌─────────┐
-              │ lqm-ingest│ │lqm-mcp │ │ lqm-cli │
-              │  (lib)    │ │(binary)│ │(binary) │
-              └───────────┘ └────────┘ └─────────┘
-                                   │
-                              turbomcp
-                              (MCP SDK)
+              ┌─────────────────┼─────────────────┐
+              ▼                 ▼                 ▼
+       ┌───────────┐     ┌──────────┐      ┌─────────┐
+       │ lqm-ingest│     │ lqm-mcp  │      │ lqm-cli │
+       │  (lib)    │     │ (binary) │      │(binary) │
+       └─────┬─────┘     └────┬─────┘      └─────────┘
+             │                │ turbomcp
+             └───────┬────────┘
+                     ▼
+              ┌──────────┐
+              │ lqm-api  │  (axum binary; REST + static UI)
+              └──────────┘
 ```
 
-- `lqm-core` — zero side effects. Owns chunking, embedding orchestration
-  (pluggable `Embedder` trait), Qdrant client wrapper, payload types, and
-  concurrency control (semaphore). Everything else depends on this.
-- `lqm-ingest` — source extractors (markdown, code, text, conversation logs
-  now; PDF, audio later). Produces `DocumentChunk`s consumed by core.
-- `lqm-mcp` — turbomcp server exposing tools. Stdio by default; HTTP optional.
-- `lqm-cli` — admin, bulk ingest, embedder benchmarking.
-- `lqm-api` (future) — HTTP server (axum) powering a Dioxus frontend.
+- `lqm-core` — no MCP/HTTP *frameworks*. Owns chunking, pluggable `Embedder`,
+  Qdrant wrapper, payload types, hybrid/memory/scope, semaphore. Binaries
+  depend on this.
+- `lqm-ingest` — extractors (text, PDF feature, audio placeholder) + URL fetch
+  (`fetch-url` feature). Returns raw text; core owns chunking.
+- `lqm-mcp` — turbomcp tools. Stdio default; `serve` for streamable HTTP.
+- `lqm-cli` — admin bulk ingest / list / delete / bench (same `expand_to_chunks`).
+- `lqm-api` — axum REST parity with MCP + interim static search page.
 
 ## Data Flow
 
 ### Ingestion
 
 ```
-file / dir → lqm-ingest extractor → Vec<DocumentChunk>
-                                         │
-                                         ▼
-                                    lqm-core
-                              ┌─────────────────┐
-                              │ chunk if needed  │
-                              │ embed_batch()    │
-                              │ upsert Qdrant ◄──┼── embed_semaphore
-                              └─────────────────┘
+file / dir / text / url
+        │
+        ▼
+  lqm-ingest extract_text (if path/url)
+        │
+        ▼
+  RagCore::expand_to_chunks  (structure-aware: md / code / paragraphs)
+        │
+        ▼
+  embed_batch + embed_and_upsert_batch  (skip/replace by ingest_hash)
+        │
+        ▼
+     Qdrant points
 ```
 
-### Search
+All MCP, HTTP, and CLI ingest paths call the same `expand_to_chunks` helper so
+chunk boundaries stay consistent across surfaces.
+
+### Search (dense)
 
 ```
-query text → lqm-core → embed(query)
-                      → Qdrant.search(vector, filters)
-                      → Vec<SearchResult>
+query → embed(query) → Qdrant dense search (+ SearchFilter)
+                     → Vec<SearchResult> / SearchPage
+```
+
+### Hybrid search
+
+```
+query → dense search (over-fetch)
+      → scroll_payloads (full collection, keyword scores)
+      → merge_and_fuse_hybrid (weighted + RRF)
+      → page slice
+```
+
+### Memory recall
+
+```
+query → search_page(collection=memories, source_type=memory)
+      → rank_memory_hits (optional recency/importance blend)
 ```
 
 Chunking and metadata are always applied the same way because both paths go
 through `lqm-core`. The web UI and agents see consistent results.
+
+## Scaling boundaries
+
+Homelab-friendly defaults; know these before large corpora:
+
+| Operation | Complexity | Notes |
+|-----------|------------|--------|
+| Hybrid search keyword path | O(n) points | `scroll_payloads` walks the whole collection (page size `KEYWORD_SCROLL_PAGE`). Fine for thousands of points; at 10k+ consider sparse vectors or a keyword index. |
+| `list_sources` | O(n) payloads | Full payload scroll to aggregate source counts. |
+| Embed concurrency | `num_cpus` semaphore | `embed_semaphore` default = CPU count; raise carefully under heavy concurrent ingest. |
+| Payload→JSON conversion | O(keys × hits) | Shared `qdrant_value_to_json`; still allocates per hit — acceptable for typical agent page sizes. |
 
 ## Concurrency Model
 
@@ -74,17 +110,29 @@ through `lqm-core`. The web UI and agents see consistent results.
 | Payload schema            | `lqm-core/types`      | Extensible metadata per source type                |
 | Transport (turbomcp)      | `lqm-mcp`             | Stdio, HTTP, WebSocket, TCP, Unix, channel          |
 | Filter policy             | `lqm-core/qdrant`     | Customizable search scoping                        |
-| Frontend / API            | `lqm-api` (future)    | Same core powers both agent tools and web UI       |
+| Frontend / API            | `lqm-api`             | REST parity with MCP; static UI interim            |
+
+## Related docs
+
+| Doc | Role |
+|-----|------|
+| [`docs/PLAN.md`](PLAN.md) | Design rationale |
+| [`docs/ROADMAP.md`](ROADMAP.md) | Shipped / backlog |
+| [`docs/AGENTS.md`](AGENTS.md) | Tool matrix for hosts |
+| [`docs/AUDIT.md`](AUDIT.md) | Maintainability audit + dispositions |
+| [`../liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md`](../liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md) | Gaps vs AnythingLLM knowledge layer |
 
 ## Design Principles
 
 1. **Loose coupling.** Each crate has one clear responsibility. New embedders
    and source types are feature-gated additions, not rewrites.
-2. **Core is pure.** `lqm-core` never spawns processes, opens sockets, or
-   depends on MCP/HTTP frameworks.
+2. **Core avoids product frameworks.** `lqm-core` does not depend on MCP or
+   HTTP frameworks (it does talk to Qdrant via `qdrant-client`).
 3. **Batching by default.** Embedding is batch-oriented; MCP tools expose batch
    variants.
-4. **Testable seams.** `Embedder` trait + turbomcp `channel` transport +
-   `McpTestClient` make both core and MCP layers testable in-process.
+4. **Testable seams.** `Embedder` trait + live smokes; channel + `McpTestClient`
+   planned for offline MCP integration tests.
 5. **Config-driven, not hard-coded.** Model choice, chunking params, semaphore
    size, Qdrant addr are all configurable.
+6. **Surface parity.** MCP, HTTP, and CLI share `expand_to_chunks` and the same
+   payload schema so agents see consistent retrieval quality.

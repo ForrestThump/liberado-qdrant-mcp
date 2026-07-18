@@ -1,3 +1,8 @@
+//! Qdrant client wrapper and `RagCore` (embed + upsert + search orchestration).
+//!
+//! All agent/HTTP/CLI surfaces should go through `RagCore` so chunking, payload
+//! schema, and re-ingest policy stay consistent.
+
 use crate::chunking::{ChunkingStrategy, chunk_text};
 use crate::embedding::Embedder;
 use crate::error::LqmError;
@@ -5,7 +10,7 @@ use crate::lifecycle::decide_source_reingest;
 use crate::types::{
     ChunkConfig, CollectionInfoSummary, DocumentChunk, EmbedderInfo, INDEX_FIELDS, IngestReport,
     PayloadFilter, ReingestAction, SearchFilter, SearchOptions, SearchPage, SearchResult,
-    SourceSummary, UpsertPoint, payload_schema,
+    SourceSummary, UpsertPoint, payload_schema, payload_str,
 };
 use qdrant_client::Qdrant as QdrantGrpc;
 use qdrant_client::qdrant::{
@@ -38,13 +43,19 @@ pub struct QdrantClient {
 }
 
 impl QdrantClient {
+    /// Build a client and validate connectivity with `list_collections`.
+    ///
+    /// The gRPC client constructor is synchronous; the `.await` is the health check.
     pub async fn new(url: &str) -> Result<Self, QdrantError> {
         let qdrant = QdrantGrpc::from_url(url)
             .build()
             .map_err(|e| QdrantError::Qdrant(e.to_string()))?;
-        Ok(Self {
+        let client = Self {
             inner: Arc::new(qdrant),
-        })
+        };
+        // Fail fast when Qdrant is unreachable rather than on the first tool call.
+        client.list_collections().await?;
+        Ok(client)
     }
 
     pub async fn list_collections(&self) -> Result<Vec<String>, QdrantError> {
@@ -62,7 +73,8 @@ impl QdrantClient {
         if exists {
             return Ok(());
         }
-        self.inner
+        match self
+            .inner
             .create_collection(CreateCollection {
                 collection_name: name.to_string(),
                 vectors_config: Some(qdrant_client::qdrant::VectorsConfig {
@@ -76,8 +88,19 @@ impl QdrantClient {
                 }),
                 ..Default::default()
             })
-            .await?;
-        Ok(())
+            .await
+        {
+            Ok(_) => Ok(()),
+            // Concurrent creators may race past collection_exists; treat already-exists as success.
+            Err(e) => {
+                let msg = e.to_string().to_lowercase();
+                if msg.contains("already") || msg.contains("exists") {
+                    Ok(())
+                } else {
+                    Err(QdrantError::from(e))
+                }
+            }
+        }
     }
 
     pub async fn delete_collection(&self, name: &str) -> Result<bool, QdrantError> {
@@ -332,7 +355,7 @@ impl QdrantClient {
             }
             let resp = self.inner.scroll(builder).await?;
             for pt in resp.result {
-                out.push(qdrant_payload_to_json(&pt.payload));
+                out.push(qdrant_payload_to_json(pt.payload.iter()));
             }
             match resp.next_page_offset {
                 Some(next) => offset = Some(next),
@@ -507,44 +530,38 @@ pub fn search_filter_to_qdrant(f: &SearchFilter) -> Option<Filter> {
     }
 }
 
-fn qdrant_payload_to_json(
-    payload: &HashMap<String, qdrant_client::qdrant::Value>,
-) -> crate::types::Payload {
-    serde_json::to_value(
-        payload
-            .iter()
-            .map(|(k, v)| {
-                let json_val = match &v.kind {
+/// Convert a single Qdrant protobuf `Value` into `serde_json::Value`.
+fn qdrant_value_to_json(v: &qdrant_client::qdrant::Value) -> serde_json::Value {
+    match &v.kind {
+        Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => {
+            serde_json::Value::String(s.clone())
+        }
+        Some(qdrant_client::qdrant::value::Kind::ListValue(lv)) => serde_json::Value::Array(
+            lv.values
+                .iter()
+                .map(|item| match &item.kind {
                     Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => {
                         serde_json::Value::String(s.clone())
                     }
-                    Some(qdrant_client::qdrant::value::Kind::ListValue(lv)) => {
-                        serde_json::Value::Array(
-                            lv.values
-                                .iter()
-                                .map(|item| match &item.kind {
-                                    Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => {
-                                        serde_json::Value::String(s.clone())
-                                    }
-                                    _ => serde_json::Value::String(format!("{:?}", item)),
-                                })
-                                .collect(),
-                        )
-                    }
-                    _ => serde_json::Value::String(format!("{:?}", v)),
-                };
-                (k.clone(), json_val)
-            })
+                    _ => serde_json::Value::String(format!("{:?}", item)),
+                })
+                .collect(),
+        ),
+        _ => serde_json::Value::String(format!("{:?}", v)),
+    }
+}
+
+fn qdrant_payload_to_json<'a, I>(payload: I) -> crate::types::Payload
+where
+    I: IntoIterator<Item = (&'a String, &'a qdrant_client::qdrant::Value)>,
+{
+    serde_json::to_value(
+        payload
+            .into_iter()
+            .map(|(k, v)| (k.clone(), qdrant_value_to_json(v)))
             .collect::<HashMap<_, _>>(),
     )
     .unwrap_or_default()
-}
-
-fn payload_str(payload: &serde_json::Value, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
 }
 
 fn scored_point_to_search_result(sp: &ScoredPoint) -> SearchResult {
@@ -558,34 +575,7 @@ fn scored_point_to_search_result(sp: &ScoredPoint) -> SearchResult {
         })
         .unwrap_or_default();
 
-    let payload: crate::types::Payload = serde_json::to_value(
-        sp.payload
-            .iter()
-            .map(|(k, v)| {
-                let json_val = match &v.kind {
-                    Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => {
-                        serde_json::Value::String(s.clone())
-                    }
-                    Some(qdrant_client::qdrant::value::Kind::ListValue(lv)) => {
-                        serde_json::Value::Array(
-                            lv.values
-                                .iter()
-                                .map(|v| match &v.kind {
-                                    Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => {
-                                        serde_json::Value::String(s.clone())
-                                    }
-                                    _ => serde_json::Value::String(format!("{:?}", v)),
-                                })
-                                .collect(),
-                        )
-                    }
-                    _ => serde_json::Value::String(format!("{:?}", v)),
-                };
-                (k.clone(), json_val)
-            })
-            .collect::<std::collections::HashMap<_, _>>(),
-    )
-    .unwrap_or_default();
+    let payload: crate::types::Payload = qdrant_payload_to_json(sp.payload.iter());
 
     SearchResult {
         text,
@@ -642,6 +632,38 @@ impl RagCore {
             .with_auto_index(config.auto_index)
     }
 
+    /// Build `RagCore` from environment / optional config file and `QDRANT_URL`.
+    ///
+    /// - Embedder: `EmbedderConfig::load_or_default(config_path)`
+    /// - Qdrant URL: `qdrant_url` if provided, else `QDRANT_URL`, else `DEFAULT_QDRANT_URL`
+    pub async fn from_env(
+        qdrant_url: Option<&str>,
+        config_path: Option<&str>,
+    ) -> Result<Self, LqmError> {
+        let url = qdrant_url
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("QDRANT_URL").ok())
+            .unwrap_or_else(|| crate::constants::DEFAULT_QDRANT_URL.to_string());
+        let embedder_config = crate::config::EmbedderConfig::load_or_default(config_path)?;
+        let embedder = crate::config::create_embedder(&embedder_config)?;
+        let qdrant = QdrantClient::new(&url).await?;
+        Ok(Self::from_config(
+            qdrant,
+            embedder,
+            &crate::types::RagConfig::default(),
+        ))
+    }
+
+    /// Chunking config currently applied to structure-aware ingest.
+    pub fn chunk_config(&self) -> &ChunkConfig {
+        &self.chunk_config
+    }
+
+    /// Whether payload indexes are auto-created on `ensure_collection`.
+    pub fn auto_index(&self) -> bool {
+        self.auto_index
+    }
+
     pub async fn delete_collection(&self, name: &str) -> Result<bool, LqmError> {
         log::info!("deleting collection '{}'", name);
         Ok(self.qdrant.delete_collection(name).await?)
@@ -650,7 +672,8 @@ impl RagCore {
     /// Create (or ensure) a collection. When `vector_dim` is `None`, uses the active embedder's
     /// dimension — the only size that will accept later upserts from this process.
     ///
-    /// Returns `true` if the collection was newly created, `false` if it already existed.
+    /// Returns `true` if the collection did not exist before this call (best-effort under
+    /// concurrent creators; both may observe `created=true` while only one actually creates).
     pub async fn create_collection(
         &self,
         name: &str,
@@ -668,7 +691,8 @@ impl RagCore {
             ));
         }
         let existed = self.qdrant.collection_exists(name).await?;
-        self.ensure_collection(name, dim).await?;
+        // ensure_collection re-checks + creates with already-exists tolerance (TOCTOU-safe).
+        self.ensure_collection(name, Some(dim)).await?;
         Ok(!existed)
     }
 
@@ -798,7 +822,10 @@ impl RagCore {
         source: &str,
     ) -> Result<Vec<String>, LqmError> {
         let filter = payload_filter_to_qdrant(&PayloadFilter::for_source(source));
-        let payloads = self.qdrant.scroll_payloads(collection, filter, 256).await?;
+        let payloads = self
+            .qdrant
+            .scroll_payloads(collection, filter, crate::constants::SCROLL_PAGE_SIZE)
+            .await?;
         Ok(payloads
             .iter()
             .filter_map(|p| payload_str(p, "ingest_hash"))
@@ -810,7 +837,10 @@ impl RagCore {
         if !self.qdrant.collection_exists(collection).await? {
             return Ok(vec![]);
         }
-        let payloads = self.qdrant.scroll_payloads(collection, None, 256).await?;
+        let payloads = self
+            .qdrant
+            .scroll_payloads(collection, None, crate::constants::SCROLL_PAGE_SIZE)
+            .await?;
         let mut map: HashMap<String, SourceSummary> = HashMap::new();
         for p in payloads {
             let Some(source) = payload_str(&p, "source") else {
@@ -947,8 +977,7 @@ impl RagCore {
         let filter = search_filter_to_qdrant(&opts.filter);
 
         if !opts.hybrid {
-            // Fetch one extra hit to detect has_more without a separate count call.
-            let fetch_limit = limit.saturating_add(1);
+            let fetch_limit = limit.saturating_add(crate::constants::HAS_MORE_EXTRA);
             let mut results = self
                 .qdrant
                 .search(
@@ -1001,31 +1030,28 @@ impl RagCore {
 
         let tokens = crate::hybrid::tokenize_for_keyword(query);
         let mut keyword_candidates: Vec<SearchResult> = Vec::new();
-        if !tokens.is_empty() {
-            // Bounded scroll for rare-token hits dense may bury or miss.
-            const KEYWORD_SCROLL_PAGE: u32 = 128;
-            if let Ok(payloads) = self
+        if !tokens.is_empty()
+            && let Ok(payloads) = self
                 .qdrant
-                .scroll_payloads(collection, filter, KEYWORD_SCROLL_PAGE)
+                .scroll_payloads(collection, filter, crate::constants::KEYWORD_SCROLL_PAGE)
                 .await
-            {
-                for payload in payloads {
-                    let text = payload
-                        .get(payload_schema::TEXT)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    let kw = crate::hybrid::keyword_score(&text, &tokens);
-                    if kw > 0.0 {
-                        keyword_candidates.push(SearchResult {
-                            text,
-                            score: 0.0,
-                            payload,
-                        });
-                    }
+        {
+            for payload in payloads {
+                let text = payload
+                    .get(payload_schema::TEXT)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                let kw = crate::hybrid::keyword_score(&text, &tokens);
+                if kw > 0.0 {
+                    keyword_candidates.push(SearchResult {
+                        text,
+                        score: 0.0,
+                        payload,
+                    });
                 }
             }
         }
@@ -1070,15 +1096,19 @@ impl RagCore {
         Ok(self.qdrant.list_collections().await?)
     }
 
-    pub async fn ensure_collection(&self, name: &str, vector_dim: usize) -> Result<(), LqmError> {
+    /// Ensure a collection exists. When `vector_dim` is `None`, uses the active embedder dimension.
+    pub async fn ensure_collection(
+        &self,
+        name: &str,
+        vector_dim: Option<usize>,
+    ) -> Result<(), LqmError> {
+        let dim = vector_dim.unwrap_or_else(|| self.embedder.dimension());
         let exists = self.qdrant.collection_exists(name).await?;
         if exists {
             log::debug!("collection '{}' already exists", name);
         } else {
-            log::info!("creating collection '{}' (dim={})", name, vector_dim);
-            self.qdrant
-                .create_collection(name, vector_dim as u64)
-                .await?;
+            log::info!("creating collection '{}' (dim={})", name, dim);
+            self.qdrant.create_collection(name, dim as u64).await?;
         }
 
         if self.auto_index {
@@ -1119,6 +1149,51 @@ impl RagCore {
         crate::chunking::chunk_for_ingest(text, source_type, path_hint, &strategy)
     }
 
+    /// Expand a source document into structure-aware `DocumentChunk`s for upsert.
+    ///
+    /// Shared by MCP, HTTP API, and CLI so all surfaces produce identical chunk boundaries.
+    #[allow(clippy::too_many_arguments)]
+    pub fn expand_to_chunks(
+        &self,
+        text: &str,
+        source: Option<String>,
+        source_type: Option<String>,
+        collection: String,
+        tags: Option<Vec<String>>,
+        project: Option<String>,
+        last_modified: Option<String>,
+        path_hint: Option<&str>,
+        scope: Option<String>,
+        clearance: Option<String>,
+    ) -> Vec<DocumentChunk> {
+        let pieces = self.chunk_for_ingest(
+            text,
+            source_type.as_deref(),
+            path_hint.or(source.as_deref()),
+        );
+        let total = pieces.len();
+        pieces
+            .into_iter()
+            .enumerate()
+            .map(|(i, text)| DocumentChunk {
+                text,
+                source: source.clone(),
+                source_type: source_type.clone(),
+                collection: Some(collection.clone()),
+                tags: tags.clone(),
+                timestamp: None,
+                project: project.clone(),
+                last_modified: last_modified.clone(),
+                chunk_index: Some(i),
+                total_chunks: Some(total),
+                importance: None,
+                memory_id: None,
+                scope: scope.clone(),
+                clearance: clearance.clone(),
+            })
+            .collect()
+    }
+
     /// Active embedder identity for agent/HTTP introspection.
     pub fn embedder_info(&self) -> EmbedderInfo {
         EmbedderInfo {
@@ -1143,13 +1218,9 @@ impl RagCore {
             ));
         }
         let coll = collection.unwrap_or(crate::memory::DEFAULT_MEMORY_COLLECTION);
-        let dim = self.embedder.dimension();
-        self.ensure_collection(coll, dim).await?;
+        self.ensure_collection(coll, None).await?;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = crate::types::unix_now_secs();
         let chunk = crate::memory::memory_note_to_chunk(&note, coll, now);
         let memory_id = chunk
             .memory_id
@@ -1199,12 +1270,13 @@ impl RagCore {
             )
             .await?;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        // ~7 day half-life for recency decay
-        let hits = crate::memory::rank_memory_hits(&page.results, now, use_recency, 7.0 * 86_400.0);
+        let now = crate::types::unix_now_secs();
+        let hits = crate::memory::rank_memory_hits(
+            &page.results,
+            now,
+            use_recency,
+            crate::constants::MEMORY_RECENCY_HALF_LIFE,
+        );
         Ok(hits)
     }
 }
@@ -1450,10 +1522,20 @@ mod tests {
             max_clearance: Some("internal".into()),
         };
         let qf = search_filter_to_qdrant(&f).expect("filter");
-        // source + source_type + project + 2 tags + scope + nested clearance must
-        assert_eq!(qf.must.len(), 7);
-        assert_eq!(qf.should.len(), 1);
-        assert_eq!(qf.must_not.len(), 1);
+        // Decomposition of must conditions for a full filter:
+        //   1 source + 1 source_type + 1 project + 2 tags (AND) + 1 scope + 1 clearance
+        let expected_must = 1 + 1 + 1 + 2 + 1 + 1;
+        assert_eq!(
+            qf.must.len(),
+            expected_must,
+            "must conditions: source(1)+source_type(1)+project(1)+tags(2)+scope(1)+clearance(1)"
+        );
+        assert_eq!(qf.should.len(), 1, "tags_should contributes one should");
+        assert_eq!(
+            qf.must_not.len(),
+            1,
+            "tags_must_not contributes one must_not"
+        );
 
         // Scope-only excludes empty filter
         let scoped = search_filter_to_qdrant(&SearchFilter {
@@ -1500,6 +1582,53 @@ mod tests {
         assert_eq!(chunks[0], "short text");
     }
 
+    #[test]
+    fn expand_to_chunks_sets_indices() {
+        let core = make_fake_core(1);
+        let chunks = core.expand_to_chunks(
+            "# A\n\none\n\n# B\n\ntwo",
+            Some("doc.md".into()),
+            Some("text".into()),
+            "default".into(),
+            None,
+            None,
+            None,
+            Some("doc.md"),
+            None,
+            None,
+        );
+        assert!(chunks.len() >= 2);
+        assert_eq!(chunks[0].chunk_index, Some(0));
+        assert_eq!(chunks[0].total_chunks, Some(chunks.len()));
+        assert_eq!(chunks.last().unwrap().chunk_index, Some(chunks.len() - 1));
+        assert_eq!(chunks[0].source.as_deref(), Some("doc.md"));
+        assert_eq!(chunks[0].collection.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn resolve_collection_and_helpers() {
+        assert_eq!(
+            crate::types::resolve_collection(None),
+            crate::types::DEFAULT_COLLECTION_NAME
+        );
+        assert_eq!(crate::types::resolve_collection(Some("x".into())), "x");
+        let fr = crate::types::make_file_result("p", true, None, 3);
+        assert_eq!(fr["ok"], true);
+        assert_eq!(fr["chunks"], 3);
+        assert!(!crate::types::unix_now_secs_str().is_empty());
+        assert!(!crate::types::INDEX_FIELDS.contains(&"collection"));
+    }
+
+    #[test]
+    fn chunk_config_accessors() {
+        let core = make_fake_core(1);
+        assert!(core.auto_index());
+        assert_eq!(
+            core.chunk_config().chunk_size,
+            crate::constants::DEFAULT_CHUNK_SIZE
+        );
+    }
+
     #[tokio::test]
     async fn test_qdrant_connection() {
         let qdrant = QdrantClient::new("http://localhost:6334").await;
@@ -1519,7 +1648,9 @@ mod tests {
     #[tokio::test]
     async fn test_ensure_collection() {
         let core = make_fake_core(2);
-        let result = core.ensure_collection("lqm_core_test_ensure", 128).await;
+        let result = core
+            .ensure_collection("lqm_core_test_ensure", Some(128))
+            .await;
         match result {
             Ok(()) => {
                 let collections = core.list_collections().await.unwrap();

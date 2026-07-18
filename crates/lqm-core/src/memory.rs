@@ -4,6 +4,7 @@
 //! with `source_type = "memory"` so they stay distinguishable from document chunks.
 //! Generation stays in the host agent — this module only store/recall.
 
+use crate::constants;
 use crate::types::{DocumentChunk, SearchResult, payload_schema};
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_MEMORY_COLLECTION: &str = "memories";
 
 /// Payload / source_type marker for memory points.
-pub const MEMORY_SOURCE_TYPE: &str = "memory";
+pub const MEMORY_SOURCE_TYPE: &str = constants::SOURCE_TYPE_MEMORY;
 
 /// Extra payload keys for memories (in addition to standard ingest keys).
 pub mod memory_payload {
@@ -169,8 +170,7 @@ pub fn blend_memory_score(
     let sem = semantic_score.clamp(0.0, 1.0);
 
     if !use_recency {
-        // Importance-aware only: mostly semantic, light importance nudge.
-        return 0.75 * sem + 0.25 * imp;
+        return constants::MEMORY_BLEND_SEM_WEIGHT * sem + constants::MEMORY_BLEND_IMP_WEIGHT * imp;
     }
 
     let half = half_life_secs.max(1.0);
@@ -185,7 +185,9 @@ pub fn blend_memory_score(
         None => 0.0,
     };
 
-    0.60 * sem + 0.25 * imp + 0.15 * recency
+    constants::MEMORY_BLEND_RECENCY_SEM_WEIGHT * sem
+        + constants::MEMORY_BLEND_RECENCY_IMP_WEIGHT * imp
+        + constants::MEMORY_BLEND_RECENCY_REC_WEIGHT * recency
 }
 
 /// Convert search hits into `MemoryHit`s and optionally re-sort by blended score.

@@ -1,3 +1,5 @@
+//! Shared domain types: chunks, search filters, payload schema, and helpers.
+
 use serde::{Deserialize, Serialize};
 
 pub type Payload = serde_json::Value;
@@ -276,8 +278,8 @@ pub struct ChunkConfig {
 impl Default for ChunkConfig {
     fn default() -> Self {
         Self {
-            chunk_size: 2048,
-            overlap: 200,
+            chunk_size: crate::constants::DEFAULT_CHUNK_SIZE,
+            overlap: crate::constants::DEFAULT_CHUNK_OVERLAP,
         }
     }
 }
@@ -293,7 +295,7 @@ pub struct RagConfig {
 impl Default for RagConfig {
     fn default() -> Self {
         Self {
-            qdrant_url: "http://localhost:6334".to_string(),
+            qdrant_url: crate::constants::DEFAULT_QDRANT_URL.to_string(),
             embed_semaphore_permits: num_cpus::get(),
             chunk: ChunkConfig::default(),
             auto_index: true,
@@ -310,11 +312,54 @@ pub struct UpsertPoint {
 
 pub const DEFAULT_COLLECTION_NAME: &str = "default";
 
+/// Resolve an optional collection name to the workspace default.
+pub fn resolve_collection(collection: Option<String>) -> String {
+    collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string())
+}
+
+/// Current unix time in seconds (0 if the clock is before the epoch).
+pub fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Current unix time in seconds as a decimal string.
+pub fn unix_now_secs_str() -> String {
+    unix_now_secs().to_string()
+}
+
+/// Read a string field from a JSON payload object.
+pub fn payload_str(payload: &serde_json::Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Per-item result object used by multi-file ingest tools (MCP + HTTP).
+pub fn make_file_result(
+    path: &str,
+    ok: bool,
+    error: Option<&str>,
+    chunks: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "path": path,
+        "ok": ok,
+        "error": error,
+        "chunks": chunks,
+    })
+}
+
 /// Keyword payload indexes created on new collections (filter + lifecycle paths).
+///
+/// Note: Qdrant collection name is the collection itself — not a filterable payload key.
+/// `build_point_payload` does not write a `collection` field.
 pub const INDEX_FIELDS: &[&str] = &[
     "source",
     "source_type",
-    "collection",
     "ingest_hash",
     "project",
     "tags",

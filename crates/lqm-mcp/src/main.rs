@@ -1,10 +1,10 @@
 use clap::{Parser, Subcommand};
 use lqm_core::RagCore;
-use lqm_core::config::{EmbedderConfig, create_embedder};
+use lqm_core::constants;
 use lqm_core::format_relevant_context_with;
 use lqm_core::types::{
-    ContextOptions, DEFAULT_COLLECTION_NAME, DocumentChunk, PayloadFilter, RagConfig, SearchFilter,
-    SearchOptions,
+    ContextOptions, DocumentChunk, PayloadFilter, SearchFilter, SearchOptions, make_file_result,
+    resolve_collection,
 };
 use lqm_core::{DEFAULT_MEMORY_COLLECTION, MemoryNote};
 use serde_json::Value;
@@ -93,14 +93,11 @@ impl LqmServer {
     /// wrong width makes every later upsert fail on a dimension mismatch, and Qdrant will not
     /// silently resize it.
     async fn ensure_collection(&self, collection: &str) -> McpResult<()> {
-        let dim = self.core.embedder.dimension();
         self.core
-            .ensure_collection(collection, dim)
+            .ensure_collection(collection, None)
             .await
             .map_err(|e| {
-                McpError::internal(format!(
-                    "could not ensure collection '{collection}' (dim={dim}): {e}"
-                ))
+                McpError::internal(format!("could not ensure collection '{collection}': {e}"))
             })
     }
 
@@ -119,32 +116,18 @@ impl LqmServer {
         scope: Option<String>,
         clearance: Option<String>,
     ) -> Vec<DocumentChunk> {
-        let pieces = self.core().chunk_for_ingest(
+        self.core().expand_to_chunks(
             text,
-            source_type.as_deref(),
-            path_hint.or(source.as_deref()),
-        );
-        let total = pieces.len();
-        pieces
-            .into_iter()
-            .enumerate()
-            .map(|(i, text)| DocumentChunk {
-                text,
-                source: source.clone(),
-                source_type: source_type.clone(),
-                collection: Some(collection.clone()),
-                tags: tags.clone(),
-                timestamp: None,
-                project: project.clone(),
-                last_modified: last_modified.clone(),
-                chunk_index: Some(i),
-                total_chunks: Some(total),
-                importance: None,
-                memory_id: None,
-                scope: scope.clone(),
-                clearance: clearance.clone(),
-            })
-            .collect()
+            source,
+            source_type,
+            collection,
+            tags,
+            project,
+            last_modified,
+            path_hint,
+            scope,
+            clearance,
+        )
     }
 }
 
@@ -175,7 +158,7 @@ impl LqmServer {
         clearance: Option<String>,
     ) -> McpResult<Value> {
         let core = self.core();
-        let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        let collection = resolve_collection(collection);
 
         // Qdrant rejects an upsert into a collection that does not exist, and this server exposes no
         // create_collection tool — so without this an agent could never ingest anything at all: even
@@ -332,9 +315,7 @@ impl LqmServer {
         scope: Option<String>,
         max_clearance: Option<String>,
     ) -> McpResult<Value> {
-        let coll = collection
-            .clone()
-            .unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        let coll = resolve_collection(collection.clone());
         let page = self
             .core()
             .search_page(
@@ -471,7 +452,7 @@ impl LqmServer {
         project: Option<String>,
         source: Option<String>,
     ) -> McpResult<Value> {
-        let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        let collection = resolve_collection(collection);
         self.ensure_collection(&collection).await?;
 
         let fetched = lqm_ingest::fetch_url(&url, None)
@@ -541,7 +522,7 @@ impl LqmServer {
     #[tool]
     async fn ingest_path(&self, path: String, collection: Option<String>) -> McpResult<Value> {
         let core = self.core();
-        let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        let collection = resolve_collection(collection);
         self.ensure_collection(&collection).await?;
         let metadata = std::fs::metadata(&path)
             .map_err(|e| McpError::internal(format!("cannot access path: {e}")))?;
@@ -659,7 +640,7 @@ impl LqmServer {
         tags: Option<Vec<String>>,
         project: Option<String>,
     ) -> McpResult<Value> {
-        let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        let collection = resolve_collection(collection);
         self.ensure_collection(&collection).await?;
 
         let mut all_chunks: Vec<DocumentChunk> = Vec::new();
@@ -671,7 +652,7 @@ impl LqmServer {
                 let pieces = self.expand_to_chunks(
                     &text,
                     Some(src.clone()),
-                    Some("text".to_string()),
+                    Some(constants::SOURCE_TYPE_TEXT.to_string()),
                     collection.clone(),
                     tags.clone(),
                     project.clone(),
@@ -682,12 +663,7 @@ impl LqmServer {
                 );
                 let n = pieces.len();
                 all_chunks.extend(pieces);
-                file_results.push(serde_json::json!({
-                    "path": src,
-                    "ok": true,
-                    "error": null,
-                    "chunks": n,
-                }));
+                file_results.push(make_file_result(&src, true, None, n));
             }
         }
 
@@ -713,20 +689,11 @@ impl LqmServer {
                             n += pieces.len();
                             all_chunks.extend(pieces);
                         }
-                        file_results.push(serde_json::json!({
-                            "path": path,
-                            "ok": true,
-                            "error": null,
-                            "chunks": n,
-                        }));
+                        file_results.push(make_file_result(&path, true, None, n));
                     }
                     Err(e) => {
-                        file_results.push(serde_json::json!({
-                            "path": path,
-                            "ok": false,
-                            "error": e.to_string(),
-                            "chunks": 0,
-                        }));
+                        let err = e.to_string();
+                        file_results.push(make_file_result(&path, false, Some(&err), 0));
                     }
                 }
             }
@@ -751,21 +718,19 @@ impl LqmServer {
                         );
                         let n = pieces.len();
                         all_chunks.extend(pieces);
-                        file_results.push(serde_json::json!({
-                            "path": url,
-                            "ok": true,
-                            "error": null,
-                            "chunks": n,
-                            "title": fetched.title,
-                        }));
+                        let mut row = make_file_result(&url, true, None, n);
+                        if let Some(obj) = row.as_object_mut() {
+                            obj.insert(
+                                "title".into(),
+                                serde_json::to_value(fetched.title)
+                                    .unwrap_or(serde_json::Value::Null),
+                            );
+                        }
+                        file_results.push(row);
                     }
                     Err(e) => {
-                        file_results.push(serde_json::json!({
-                            "path": url,
-                            "ok": false,
-                            "error": e.to_string(),
-                            "chunks": 0,
-                        }));
+                        let err = e.to_string();
+                        file_results.push(make_file_result(&url, false, Some(&err), 0));
                     }
                 }
             }
@@ -885,7 +850,7 @@ impl LqmServer {
     /// List distinct document sources in a collection (for agent curation).
     #[tool]
     async fn list_sources(&self, collection: Option<String>) -> McpResult<Value> {
-        let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        let collection = resolve_collection(collection);
         match self.core().list_sources(&collection).await {
             Ok(sources) => Ok(serde_json::json!({
                 "status": "ok",
@@ -903,7 +868,7 @@ impl LqmServer {
         source: String,
         collection: Option<String>,
     ) -> McpResult<Value> {
-        let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        let collection = resolve_collection(collection);
         match self.core().delete_by_source(&collection, &source).await {
             Ok(deleted) => Ok(serde_json::json!({
                 "status": "ok",
@@ -928,7 +893,7 @@ impl LqmServer {
         scope: Option<String>,
         max_clearance: Option<String>,
     ) -> McpResult<Value> {
-        let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        let collection = resolve_collection(collection);
         let filter = PayloadFilter {
             source,
             source_type,
@@ -970,15 +935,9 @@ async fn create_test_server() -> Option<LqmServer> {
 #[cfg(test)]
 async fn create_test_server_detailed() -> Result<LqmServer, String> {
     let qdrant_url = test_qdrant_url();
-    let config = EmbedderConfig::load_or_default(None).map_err(|e| format!("config: {e}"))?;
-    let embedder = create_embedder(&config).map_err(|e| format!("embedder: {e}"))?;
-    let qdrant = lqm_core::QdrantClient::new(&qdrant_url)
+    let core = RagCore::from_env(Some(&qdrant_url), None)
         .await
-        .map_err(|e| format!("qdrant connect {qdrant_url}: {e}"))?;
-    let core = RagCore::from_config(qdrant, embedder, &RagConfig::default());
-    core.list_collections()
-        .await
-        .map_err(|e| format!("list_collections {qdrant_url}: {e}"))?;
+        .map_err(|e| format!("from_env {qdrant_url}: {e}"))?;
     Ok(LqmServer::new(core).await)
 }
 
@@ -1093,7 +1052,7 @@ async fn test_all_mcp_tools_live_smoke() {
         .ingest_text(
             text_body.clone(),
             Some("smoke://text".to_string()),
-            Some("text".to_string()),
+            Some(constants::SOURCE_TYPE_TEXT.to_string()),
             Some(coll.clone()),
             Some(vec!["smoke".to_string()]),
             Some("lqm_smoke".to_string()),
@@ -1115,7 +1074,7 @@ async fn test_all_mcp_tools_live_smoke() {
         .ingest_text(
             text_body.clone(),
             Some("smoke://text".to_string()),
-            Some("text".to_string()),
+            Some(constants::SOURCE_TYPE_TEXT.to_string()),
             Some(coll.clone()),
             Some(vec!["smoke".to_string()]),
             Some("lqm_smoke".to_string()),
@@ -1141,7 +1100,7 @@ async fn test_all_mcp_tools_live_smoke() {
         .ingest_text(
             "Updated smoke sentence about orange kites (v2).".to_string(),
             Some("smoke://text".to_string()),
-            Some("text".to_string()),
+            Some(constants::SOURCE_TYPE_TEXT.to_string()),
             Some(coll.clone()),
             Some(vec!["smoke".to_string()]),
             Some("lqm_smoke".to_string()),
@@ -1349,7 +1308,7 @@ async fn test_all_mcp_tools_live_smoke() {
         .delete_by_filter(
             Some(coll.clone()),
             None,
-            Some("text".to_string()),
+            Some(constants::SOURCE_TYPE_TEXT.to_string()),
             None,
             None,
             None,
@@ -1445,7 +1404,7 @@ async fn test_p5_hybrid_live_smoke() {
         .ingest_text(
             "Fluffy clouds drift over the quiet mountain lake at dawn.".to_string(),
             Some("smoke://hybrid-generic".to_string()),
-            Some("text".to_string()),
+            Some(constants::SOURCE_TYPE_TEXT.to_string()),
             Some(coll.to_string()),
             None,
             None,
@@ -1462,7 +1421,7 @@ async fn test_p5_hybrid_live_smoke() {
         .ingest_text(
             format!("Agent notes about Liberado retrieval and the token {rare} for hybrid smoke."),
             Some("smoke://hybrid-keyword".to_string()),
-            Some("text".to_string()),
+            Some(constants::SOURCE_TYPE_TEXT.to_string()),
             Some(coll.to_string()),
             None,
             None,
@@ -1528,7 +1487,7 @@ async fn test_scope_filter_live_smoke() {
         .ingest_text(
             "Alpha scope secret recipe for applesauce.".to_string(),
             Some("smoke://scope-alpha".to_string()),
-            Some("text".to_string()),
+            Some(constants::SOURCE_TYPE_TEXT.to_string()),
             Some(coll.to_string()),
             None,
             None,
@@ -1542,7 +1501,7 @@ async fn test_scope_filter_live_smoke() {
         .ingest_text(
             "Beta scope notes about bananas only.".to_string(),
             Some("smoke://scope-beta".to_string()),
-            Some("text".to_string()),
+            Some(constants::SOURCE_TYPE_TEXT.to_string()),
             Some(coll.to_string()),
             None,
             None,
@@ -1644,7 +1603,7 @@ async fn test_p0_lifecycle_live_smoke() {
         .ingest_text(
             v1.to_string(),
             Some(src.to_string()),
-            Some("text".to_string()),
+            Some(constants::SOURCE_TYPE_TEXT.to_string()),
             Some(coll.to_string()),
             Some(vec!["p0".to_string()]),
             Some("proj-p0".to_string()),
@@ -1674,7 +1633,7 @@ async fn test_p0_lifecycle_live_smoke() {
         .ingest_text(
             v1.to_string(),
             Some(src.to_string()),
-            Some("text".to_string()),
+            Some(constants::SOURCE_TYPE_TEXT.to_string()),
             Some(coll.to_string()),
             Some(vec!["p0".to_string()]),
             Some("proj-p0".to_string()),
@@ -1692,7 +1651,7 @@ async fn test_p0_lifecycle_live_smoke() {
         .ingest_text(
             v2.to_string(),
             Some(src.to_string()),
-            Some("text".to_string()),
+            Some(constants::SOURCE_TYPE_TEXT.to_string()),
             Some(coll.to_string()),
             Some(vec!["p0".to_string()]),
             Some("proj-p0".to_string()),
@@ -1796,14 +1755,14 @@ async fn test_ingest_and_search() {
 
     let coll = "lqm_mcp_test_ingest";
     let _ = core.delete_collection(coll).await;
-    core.ensure_collection(coll, dim)
+    core.ensure_collection(coll, Some(dim))
         .await
         .expect("ensure_collection");
 
     let chunk = DocumentChunk {
         text: "Hello world from lqm-mcp test".to_string(),
         source: Some("test_source".to_string()),
-        source_type: Some("text".to_string()),
+        source_type: Some(constants::SOURCE_TYPE_TEXT.to_string()),
         collection: Some(coll.to_string()),
         tags: None,
         timestamp: None,
@@ -1840,14 +1799,14 @@ async fn test_search_edge_cases() {
 
     let coll = "lqm_mcp_test_edge";
     let _ = core.delete_collection(coll).await;
-    core.ensure_collection(coll, dim)
+    core.ensure_collection(coll, Some(dim))
         .await
         .expect("ensure_collection");
 
     let chunk = DocumentChunk {
         text: "test content".to_string(),
         source: Some("s".to_string()),
-        source_type: Some("text".to_string()),
+        source_type: Some(constants::SOURCE_TYPE_TEXT.to_string()),
         collection: Some(coll.to_string()),
         tags: None,
         timestamp: None,
@@ -1896,13 +1855,17 @@ async fn test_multiple_collections_independence() {
     let coll_b = "lqm_mcp_test_b";
     let _ = core.delete_collection(coll_a).await;
     let _ = core.delete_collection(coll_b).await;
-    core.ensure_collection(coll_a, dim).await.expect("ensure a");
-    core.ensure_collection(coll_b, dim).await.expect("ensure b");
+    core.ensure_collection(coll_a, Some(dim))
+        .await
+        .expect("ensure a");
+    core.ensure_collection(coll_b, Some(dim))
+        .await
+        .expect("ensure b");
 
     let chunk_a = DocumentChunk {
         text: "content a".to_string(),
         source: Some("s".to_string()),
-        source_type: Some("text".to_string()),
+        source_type: Some(constants::SOURCE_TYPE_TEXT.to_string()),
         collection: Some(coll_a.to_string()),
         tags: None,
         timestamp: None,
@@ -1921,7 +1884,7 @@ async fn test_multiple_collections_independence() {
     let chunk_b = DocumentChunk {
         text: "content b".to_string(),
         source: Some("s".to_string()),
-        source_type: Some("text".to_string()),
+        source_type: Some(constants::SOURCE_TYPE_TEXT.to_string()),
         collection: Some(coll_b.to_string()),
         tags: None,
         timestamp: None,
@@ -1955,13 +1918,10 @@ async fn test_multiple_collections_independence() {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let cli = Cli::parse();
-    let qdrant_url = cli.qdrant_url.clone();
-    let config = EmbedderConfig::load_or_default(cli.config.as_deref())?;
-    let embedder =
-        create_embedder(&config).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-    log::info!("starting lqm-mcp, embedder backend: {}", embedder.id());
-    let qdrant = lqm_core::QdrantClient::new(&qdrant_url).await?;
-    let core = RagCore::from_config(qdrant, embedder, &RagConfig::default());
+    let core = RagCore::from_env(Some(&cli.qdrant_url), cli.config.as_deref())
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    log::info!("starting lqm-mcp, embedder backend: {}", core.embedder.id());
 
     match cli.command {
         Some(Commands::Serve { host, port }) => {
