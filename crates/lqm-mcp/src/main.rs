@@ -453,20 +453,250 @@ impl LqmServer {
 
 #[cfg(test)]
 fn test_qdrant_url() -> String {
-    std::env::var("QDRANT_URL").unwrap_or_else(|_| "http://localhost:6334".to_string())
+    // Prefer 127.0.0.1: some Windows proxies intercept "localhost" HTTP and break readiness probes;
+    // gRPC to the same host is what the app uses.
+    std::env::var("QDRANT_URL").unwrap_or_else(|_| "http://127.0.0.1:6334".to_string())
 }
 
 #[cfg(test)]
 async fn create_test_server() -> Option<LqmServer> {
-    let qdrant_url = test_qdrant_url();
-    let config = EmbedderConfig::load_or_default(None).ok()?;
-    let embedder = create_embedder(&config).ok()?;
-    let qdrant = lqm_core::QdrantClient::new(&qdrant_url).await.ok()?;
-    let core = RagCore::from_config(qdrant, embedder, &RagConfig::default());
-    match core.list_collections().await {
-        Ok(_) => Some(LqmServer::new(core).await),
-        Err(_) => None,
+    match create_test_server_detailed().await {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("create_test_server skipped: {e}");
+            None
+        }
     }
+}
+
+#[cfg(test)]
+async fn create_test_server_detailed() -> Result<LqmServer, String> {
+    let qdrant_url = test_qdrant_url();
+    let config = EmbedderConfig::load_or_default(None).map_err(|e| format!("config: {e}"))?;
+    let embedder = create_embedder(&config).map_err(|e| format!("embedder: {e}"))?;
+    let qdrant = lqm_core::QdrantClient::new(&qdrant_url)
+        .await
+        .map_err(|e| format!("qdrant connect {qdrant_url}: {e}"))?;
+    let core = RagCore::from_config(qdrant, embedder, &RagConfig::default());
+    core.list_collections()
+        .await
+        .map_err(|e| format!("list_collections {qdrant_url}: {e}"))?;
+    Ok(LqmServer::new(core).await)
+}
+
+/// Require a live Qdrant — never skip. Used by the full-tool smoke.
+#[cfg(test)]
+async fn require_test_server() -> LqmServer {
+    create_test_server_detailed().await.unwrap_or_else(|e| {
+        panic!(
+            "live smoke requires Qdrant at {} and a working embedder: {e}",
+            test_qdrant_url()
+        )
+    })
+}
+
+/// Minimal local HTTP fixture for live `ingest_url` (no public internet required).
+#[cfg(test)]
+async fn spawn_fixture_http_server() -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fixture http");
+    let addr = listener.local_addr().expect("local_addr");
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let body = b"<html><head><title>Smoke</title><script>evil()</script></head>\
+<body><h1>Smoke Fixture Page</h1>\
+<p>Liberado Qdrant MCP smoke test content about vector search and curated context.</p>\
+</body></html>";
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(header.as_bytes()).await;
+            let _ = socket.write_all(body).await;
+        }
+    });
+    (format!("http://127.0.0.1:{}", addr.port()), handle)
+}
+
+/// Live smoke: every `#[tool]` on `LqmServer` against real Qdrant.
+///
+/// Run with Qdrant up (`QDRANT_URL`, default `http://127.0.0.1:6334`). Panics if Qdrant is down —
+/// this is not a skip-style integration test.
+#[tokio::test]
+async fn test_all_mcp_tools_live_smoke() {
+    let server = require_test_server().await;
+    let coll = format!(
+        "lqm_smoke_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+    let _ = server.delete_collection(coll.clone()).await;
+
+    // 1) create_collection
+    let created = server
+        .create_collection(coll.clone(), None)
+        .await
+        .expect("create_collection");
+    assert_eq!(created["status"], "ok", "create_collection: {created}");
+    assert_eq!(created["created"], true, "create_collection: {created}");
+    assert!(
+        created["vector_dim"].as_u64().unwrap_or(0) > 0,
+        "create_collection dim: {created}"
+    );
+
+    // 2) list_collections — must include smoke collection
+    let listed = server.list_collections().await.expect("list_collections");
+    let names = listed["collections"].as_array().expect("collections array");
+    assert!(
+        names.iter().any(|n| n.as_str() == Some(coll.as_str())),
+        "list_collections missing {coll}: {listed}"
+    );
+
+    // 3) get_collection_info
+    let info = server
+        .get_collection_info(coll.clone())
+        .await
+        .expect("get_collection_info");
+    assert_eq!(info["exists"], true, "get_collection_info: {info}");
+    assert!(
+        info["vector_size"].as_u64().is_some(),
+        "vector_size missing: {info}"
+    );
+
+    // 4) ingest_text
+    let ingested = server
+        .ingest_text(
+            "Unique smoke sentence about orange kites and vector retrieval for agents.".to_string(),
+            Some("smoke://text".to_string()),
+            Some("text".to_string()),
+            Some(coll.clone()),
+            Some(vec!["smoke".to_string()]),
+            Some("lqm_smoke".to_string()),
+            None,
+        )
+        .await
+        .expect("ingest_text");
+    assert_eq!(ingested["status"], "ok", "ingest_text: {ingested}");
+    assert!(
+        ingested["chunks"].as_u64().unwrap_or(0) >= 1,
+        "ingest_text chunks: {ingested}"
+    );
+
+    // 5) ingest_path — real temp file
+    let path_dir = std::env::temp_dir().join(format!("lqm_smoke_path_{coll}"));
+    std::fs::create_dir_all(&path_dir).expect("mkdir smoke path");
+    let path_file = path_dir.join("smoke_doc.txt");
+    std::fs::write(
+        &path_file,
+        "Path-ingested smoke document discussing blue lanterns and Qdrant collections.\n",
+    )
+    .expect("write smoke path file");
+    let path_ingested = server
+        .ingest_path(path_file.to_string_lossy().to_string(), Some(coll.clone()))
+        .await
+        .expect("ingest_path");
+    assert_eq!(
+        path_ingested["status"], "ok",
+        "ingest_path: {path_ingested}"
+    );
+    assert!(
+        path_ingested["files"].as_u64().unwrap_or(0) >= 1,
+        "ingest_path files: {path_ingested}"
+    );
+    assert!(
+        path_ingested["chunks"].as_u64().unwrap_or(0) >= 1,
+        "ingest_path chunks: {path_ingested}"
+    );
+    let _ = std::fs::remove_dir_all(&path_dir);
+
+    // 6) ingest_url — local fixture HTTP server (real GET)
+    let (fixture_url, http_handle) = spawn_fixture_http_server().await;
+    let url_ingested = server
+        .ingest_url(
+            fixture_url.clone(),
+            Some(coll.clone()),
+            Some(vec!["url-smoke".to_string()]),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("ingest_url");
+    http_handle.abort();
+    assert_eq!(url_ingested["status"], "ok", "ingest_url: {url_ingested}");
+    assert!(
+        url_ingested["chunks"].as_u64().unwrap_or(0) >= 1,
+        "ingest_url chunks: {url_ingested}"
+    );
+
+    // 7) search — expect non-empty after ingest
+    let search = server
+        .search(
+            "orange kites vector retrieval".to_string(),
+            Some(coll.clone()),
+            Some(5),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("search");
+    let results = search["results"].as_array().expect("results array");
+    assert!(
+        !results.is_empty(),
+        "search expected non-empty results: {search}"
+    );
+    assert!(
+        results[0].get("score").is_some() && results[0].get("text").is_some(),
+        "search hit missing score/text: {search}"
+    );
+
+    // 8) get_relevant_context — markdown with passages/scores
+    let ctx = server
+        .get_relevant_context(
+            "vector search curated context".to_string(),
+            Some(coll.clone()),
+            Some(5),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("get_relevant_context");
+    assert_eq!(ctx["status"], "ok", "get_relevant_context: {ctx}");
+    let context = ctx["context"].as_str().expect("context string");
+    assert!(!context.is_empty(), "empty context: {ctx}");
+    assert!(
+        context.contains("Passage") || context.contains("score"),
+        "context missing passage/score structure: {context}"
+    );
+    assert!(
+        ctx["passage_count"].as_u64().unwrap_or(0) >= 1,
+        "passage_count: {ctx}"
+    );
+
+    // 9) delete_collection cleanup
+    let deleted = server
+        .delete_collection(coll.clone())
+        .await
+        .expect("delete_collection");
+    assert_eq!(deleted["deleted"], true, "delete_collection: {deleted}");
+    let gone = server
+        .get_collection_info(coll)
+        .await
+        .expect("get after delete");
+    assert_eq!(gone["exists"], false, "collection should be gone: {gone}");
 }
 
 #[tokio::test]
@@ -529,9 +759,13 @@ async fn test_ingest_and_search() {
     }
     let server = server.unwrap();
     let core = server.core();
+    let dim = core.embedder.dimension();
 
     let coll = "lqm_mcp_test_ingest";
     let _ = core.delete_collection(coll).await;
+    core.ensure_collection(coll, dim)
+        .await
+        .expect("ensure_collection");
 
     let chunk = DocumentChunk {
         text: "Hello world from lqm-mcp test".to_string(),
@@ -543,10 +777,9 @@ async fn test_ingest_and_search() {
         project: Some("test_project".to_string()),
         last_modified: None,
     };
-    let ingest_result = core.embed_and_upsert_batch(vec![chunk]).await;
-    if ingest_result.is_err() {
-        return;
-    }
+    core.embed_and_upsert_batch(vec![chunk])
+        .await
+        .expect("upsert");
 
     let search_result = core
         .search("Hello world", Some(coll), Some(5), None, None, None)
@@ -564,9 +797,13 @@ async fn test_search_edge_cases() {
     }
     let server = server.unwrap();
     let core = server.core();
+    let dim = core.embedder.dimension();
 
     let coll = "lqm_mcp_test_edge";
     let _ = core.delete_collection(coll).await;
+    core.ensure_collection(coll, dim)
+        .await
+        .expect("ensure_collection");
 
     let chunk = DocumentChunk {
         text: "test content".to_string(),
@@ -578,7 +815,9 @@ async fn test_search_edge_cases() {
         project: None,
         last_modified: None,
     };
-    let _ = core.embed_and_upsert_batch(vec![chunk]).await;
+    core.embed_and_upsert_batch(vec![chunk])
+        .await
+        .expect("upsert");
     let result = core
         .search(
             "nonexistent_term_xyz",
@@ -606,11 +845,14 @@ async fn test_multiple_collections_independence() {
     }
     let server = server.unwrap();
     let core = server.core();
+    let dim = core.embedder.dimension();
 
     let coll_a = "lqm_mcp_test_a";
     let coll_b = "lqm_mcp_test_b";
     let _ = core.delete_collection(coll_a).await;
     let _ = core.delete_collection(coll_b).await;
+    core.ensure_collection(coll_a, dim).await.expect("ensure a");
+    core.ensure_collection(coll_b, dim).await.expect("ensure b");
 
     let chunk_a = DocumentChunk {
         text: "content a".to_string(),
@@ -622,7 +864,9 @@ async fn test_multiple_collections_independence() {
         project: None,
         last_modified: None,
     };
-    let _ = core.embed_and_upsert_batch(vec![chunk_a]).await;
+    core.embed_and_upsert_batch(vec![chunk_a])
+        .await
+        .expect("upsert a");
     let chunk_b = DocumentChunk {
         text: "content b".to_string(),
         source: Some("s".to_string()),
@@ -633,7 +877,9 @@ async fn test_multiple_collections_independence() {
         project: None,
         last_modified: None,
     };
-    let _ = core.embed_and_upsert_batch(vec![chunk_b]).await;
+    core.embed_and_upsert_batch(vec![chunk_b])
+        .await
+        .expect("upsert b");
 
     let result = core
         .search("content a", Some(coll_a), Some(5), None, None, None)

@@ -144,11 +144,12 @@ pub fn create_embedder(config: &EmbedderConfig) -> Result<Box<dyn Embedder>, Lqm
         }
         #[cfg(feature = "embed-fastembed")]
         "fastembed" => {
-            let section = config.fastembed.as_ref().ok_or_else(|| {
-                LqmError::Validation(
-                    "fastembed backend requires [embedding.fastembed] section".to_string(),
-                )
-            })?;
+            // Default model when neither TOML section nor EMBEDDING_FASTEMBED_MODEL is set —
+            // backend defaults to "fastembed", so zero-config startup must still work.
+            let default_section = FastembedSection {
+                model: Some("AllMiniLML6V2".to_string()),
+            };
+            let section = config.fastembed.as_ref().unwrap_or(&default_section);
             let model_name = section.model.as_deref().unwrap_or("AllMiniLML6V2");
             let embedder = crate::embedding::FastEmbedder::try_new(model_name).map_err(|e| {
                 LqmError::Embed(EmbedError::EmbeddingFailed(format!(
@@ -319,6 +320,22 @@ api_key = "sk-test"
         let embedder = create_embedder(&config).unwrap();
         assert_eq!(embedder.id(), "fake");
         assert_eq!(embedder.dimension(), 128);
+    }
+
+    #[test]
+    #[cfg(feature = "embed-fastembed")]
+    fn test_create_embedder_fastembed_defaults_without_section() {
+        // Zero-config: backend=fastembed and no [embedding.fastembed] must still construct.
+        let config = EmbedderConfig {
+            backend: "fastembed".to_string(),
+            dimension: None,
+            fastembed: None,
+            ollama: None,
+            openai: None,
+        };
+        let embedder = create_embedder(&config).expect("fastembed should default model");
+        assert_eq!(embedder.id(), "fastembed");
+        assert!(embedder.dimension() > 0);
     }
 
     #[test]

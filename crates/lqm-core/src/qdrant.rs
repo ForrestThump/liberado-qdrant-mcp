@@ -523,6 +523,11 @@ impl RagCore {
     ) -> Result<Vec<SearchResult>, LqmError> {
         let collection = collection.unwrap_or(crate::types::DEFAULT_COLLECTION_NAME);
         let limit = limit.unwrap_or(10);
+        // Qdrant rejects limit=0 with a validation error; treat as intentional empty result
+        // so MCP/CLI callers get a clean [] instead of a hard failure.
+        if limit == 0 {
+            return Ok(vec![]);
+        }
 
         log::debug!(
             "searching '{}' in '{}' (limit:{})",
