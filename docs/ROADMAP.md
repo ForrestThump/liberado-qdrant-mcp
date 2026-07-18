@@ -74,9 +74,9 @@ Within a band, list order is the suggested implementation sequence.
 | Band | Theme | Why high leverage | Status |
 |------|--------|-------------------|--------|
 | **P0** | Document lifecycle + true idempotency | Agents cannot curate KBs without list/delete/replace | **Shipped** |
-| **P1** | Richer retrieval | Better filters/pagination/context budget → better answers without more product | Next |
-| **P2** | Ingest quality & reporting | Fewer bad chunks; agents can act on per-file errors | Open |
-| **P3** | MCP ↔ API parity + agent ergonomics | Remaining parity (path/url ingest API, docs, errors) | Partial (lifecycle done) |
+| **P1** | Richer retrieval | Better filters/pagination/context budget → better answers without more product | **Shipped** |
+| **P2** | Ingest quality & reporting | Fewer bad chunks; agents can act on per-file errors | Next |
+| **P3** | MCP ↔ API parity + agent ergonomics | Remaining parity (path/url ingest API, docs, errors) | Partial |
 | **P4** | Memories | Agent long-term notes; valuable but after curation/retrieval | Open |
 | **P5** | Nice-to-haves | Lower payoff or out of core headless path | Open |
 
@@ -101,22 +101,27 @@ Within a band, list order is the suggested implementation sequence.
 
 ---
 
-## P1 — Richer retrieval (do next)
+## P1 — Richer retrieval (shipped)
 
 *High payoff once content can be curated; builds on existing search/context tools.*
 
-- [ ] **Richer filters** shared by `search` and `get_relevant_context`
-  - `source`, `project`, tag must / should / must_not
-  - Optional small JSON filter blob → Qdrant `Filter` (keep MCP args ergonomic)
-- [ ] **Offset / pagination** (+ `has_more` or explicit next offset)
-- [ ] **Context budget** on `get_relevant_context` (max chars/tokens, always-cite sources, clear empty-result copy)
-- [ ] Optional **simple rerank or MMR** behind a flag (defer heavy cross-encoders if costly)
+- [x] **Richer filters** shared by `search` and `get_relevant_context`
+  - `source`, `project`, tag must (`tags`) / should (`tags_should`) / must_not (`tags_must_not`)
+  - `SearchFilter` → Qdrant `Filter` via `search_filter_to_qdrant` (ergonomic MCP args, not raw JSON blob)
+- [x] **Offset / pagination** — `SearchPage { results, offset, limit, has_more, next_offset }` (limit+1 probe)
+- [x] **Context budget** on `get_relevant_context` — `max_chars_per_passage`, `max_total_chars`, always-cite sources, clearer empty-result tip
+- [x] Optional **simple MMR** (`mmr` / `mmr_lambda`) — score + token-Jaccard diversity, pure post-process
 
-**Done when:** filtered, paginated context stays within a token budget with stable citations.
+**Done when:** filtered, paginated context stays within a token budget with stable citations. ✅
+
+### Phase P1 notes (shipped)
+
+- Core: `SearchOptions` / `search_page`, `ContextOptions` / `format_relevant_context_with`, `mmr_rerank`
+- MCP + API: same filter/pagination fields; `POST /api/context` for formatted retrieval
 
 ---
 
-## P2 — Ingest quality & reporting
+## P2 — Ingest quality & reporting (do next)
 
 *Medium effort; large quality gain for vaults/code/web agents use daily.*
 

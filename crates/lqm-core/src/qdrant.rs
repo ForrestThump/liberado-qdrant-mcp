@@ -4,7 +4,8 @@ use crate::error::LqmError;
 use crate::lifecycle::decide_source_reingest;
 use crate::types::{
     ChunkConfig, CollectionInfoSummary, DocumentChunk, INDEX_FIELDS, IngestReport, PayloadFilter,
-    ReingestAction, SearchResult, SourceSummary, UpsertPoint,
+    ReingestAction, SearchFilter, SearchOptions, SearchPage, SearchResult, SourceSummary,
+    UpsertPoint,
 };
 use qdrant_client::Qdrant as QdrantGrpc;
 use qdrant_client::qdrant::{
@@ -247,6 +248,7 @@ impl QdrantClient {
         limit: u64,
         filter: Option<Filter>,
         min_score: Option<f32>,
+        offset: Option<u64>,
     ) -> Result<Vec<SearchResult>, QdrantError> {
         let search = SearchPoints {
             collection_name: collection.to_string(),
@@ -260,7 +262,7 @@ impl QdrantClient {
             }),
             params: None,
             score_threshold: min_score,
-            offset: None,
+            offset,
             vector_name: None,
             with_vectors: None,
             read_consistency: None,
@@ -414,6 +416,52 @@ pub fn payload_filter_to_qdrant(f: &PayloadFilter) -> Option<Filter> {
             must,
             should: vec![],
             must_not: vec![],
+            min_should: None,
+        })
+    }
+}
+
+/// Build a Qdrant filter for search (must / should / must_not tag modes).
+pub fn search_filter_to_qdrant(f: &SearchFilter) -> Option<Filter> {
+    if f.is_empty() {
+        return None;
+    }
+    let mut must = Vec::new();
+    let mut should = Vec::new();
+    let mut must_not = Vec::new();
+
+    if let Some(ref source) = f.source {
+        must.push(keyword_match("source", source.clone()));
+    }
+    if let Some(ref st) = f.source_type {
+        must.push(keyword_match("source_type", st.clone()));
+    }
+    if let Some(ref project) = f.project {
+        must.push(keyword_match("project", project.clone()));
+    }
+    if let Some(ref tags) = f.tags {
+        for t in tags {
+            must.push(keyword_match("tags", t.clone()));
+        }
+    }
+    if let Some(ref tags) = f.tags_should {
+        for t in tags {
+            should.push(keyword_match("tags", t.clone()));
+        }
+    }
+    if let Some(ref tags) = f.tags_must_not {
+        for t in tags {
+            must_not.push(keyword_match("tags", t.clone()));
+        }
+    }
+
+    if must.is_empty() && should.is_empty() && must_not.is_empty() {
+        None
+    } else {
+        Some(Filter {
+            must,
+            should,
+            must_not,
             min_should: None,
         })
     }
@@ -806,6 +854,7 @@ impl RagCore {
         Ok(self.qdrant.delete_points_by_filter(collection, qf).await?)
     }
 
+    /// Convenience search returning only hits (no pagination metadata).
     pub async fn search(
         &self,
         query: &str,
@@ -815,19 +864,58 @@ impl RagCore {
         source_type: Option<&str>,
         min_score: Option<f32>,
     ) -> Result<Vec<SearchResult>, LqmError> {
-        let collection = collection.unwrap_or(crate::types::DEFAULT_COLLECTION_NAME);
-        let limit = limit.unwrap_or(10);
-        // Qdrant rejects limit=0 with a validation error; treat as intentional empty result
-        // so MCP/CLI callers get a clean [] instead of a hard failure.
+        let page = self
+            .search_page(
+                query,
+                SearchOptions {
+                    collection: collection.map(|s| s.to_string()),
+                    limit,
+                    offset: None,
+                    min_score,
+                    filter: SearchFilter {
+                        source: None,
+                        source_type: source_type.map(|s| s.to_string()),
+                        project: None,
+                        tags,
+                        tags_should: None,
+                        tags_must_not: None,
+                    },
+                },
+            )
+            .await?;
+        Ok(page.results)
+    }
+
+    /// Filtered semantic search with offset pagination (`has_more` / `next_offset`).
+    pub async fn search_page(
+        &self,
+        query: &str,
+        opts: SearchOptions,
+    ) -> Result<SearchPage, LqmError> {
+        let collection = opts
+            .collection
+            .as_deref()
+            .unwrap_or(crate::types::DEFAULT_COLLECTION_NAME);
+        let limit = opts.limit.unwrap_or(10);
+        let offset = opts.offset.unwrap_or(0);
+
+        // Qdrant rejects limit=0; empty page is intentional.
         if limit == 0 {
-            return Ok(vec![]);
+            return Ok(SearchPage {
+                results: vec![],
+                offset,
+                limit: 0,
+                has_more: false,
+                next_offset: None,
+            });
         }
 
         log::debug!(
-            "searching '{}' in '{}' (limit:{})",
+            "searching '{}' in '{}' (limit:{} offset:{})",
             query,
             collection,
-            limit
+            limit,
+            offset
         );
 
         let query_embedding = self.embed_batch(vec![query.to_string()]).await?;
@@ -836,69 +924,39 @@ impl RagCore {
             .next()
             .ok_or_else(|| LqmError::Other("embedding returned empty".to_string()))?;
 
-        let mut filter = Filter {
-            must: vec![],
-            should: vec![],
-            must_not: vec![],
-            min_should: None,
-        };
+        let filter = search_filter_to_qdrant(&opts.filter);
 
-        if let Some(tags) = tags {
-            let tag_conditions: Vec<_> = tags
-                .into_iter()
-                .map(|t| qdrant_client::qdrant::Condition {
-                    condition_one_of: Some(
-                        qdrant_client::qdrant::condition::ConditionOneOf::Field(
-                            qdrant_client::qdrant::FieldCondition {
-                                key: "tags".to_string(),
-                                r#match: Some(qdrant_client::qdrant::Match {
-                                    match_value: Some(
-                                        qdrant_client::qdrant::r#match::MatchValue::Keyword(t),
-                                    ),
-                                }),
-                                ..Default::default()
-                            },
-                        ),
-                    ),
-                })
-                .collect();
-            for cond in tag_conditions {
-                filter.must.push(cond);
-            }
-        }
-
-        if let Some(st) = source_type {
-            filter.must.push(qdrant_client::qdrant::Condition {
-                condition_one_of: Some(qdrant_client::qdrant::condition::ConditionOneOf::Field(
-                    qdrant_client::qdrant::FieldCondition {
-                        key: "source_type".to_string(),
-                        r#match: Some(qdrant_client::qdrant::Match {
-                            match_value: Some(qdrant_client::qdrant::r#match::MatchValue::Keyword(
-                                st.to_string(),
-                            )),
-                        }),
-                        ..Default::default()
-                    },
-                )),
-            });
-        }
-
-        let results = self
+        // Fetch one extra hit to detect has_more without a separate count call.
+        let fetch_limit = limit.saturating_add(1);
+        let mut results = self
             .qdrant
             .search(
                 collection,
                 query_vector,
-                limit,
-                if filter.must.is_empty() && filter.should.is_empty() {
-                    None
-                } else {
-                    Some(filter)
-                },
-                min_score,
+                fetch_limit,
+                filter,
+                opts.min_score,
+                Some(offset),
             )
             .await?;
 
-        Ok(results)
+        let has_more = results.len() as u64 > limit;
+        if has_more {
+            results.truncate(limit as usize);
+        }
+        let next_offset = if has_more {
+            Some(offset.saturating_add(limit))
+        } else {
+            None
+        };
+
+        Ok(SearchPage {
+            results,
+            offset,
+            limit,
+            has_more,
+            next_offset,
+        })
     }
 
     pub async fn list_collections(&self) -> Result<Vec<String>, LqmError> {
@@ -984,6 +1042,44 @@ mod tests {
         assert_eq!(hash, hash2);
         let hash3 = compute_ingest_hash("different");
         assert_ne!(hash, hash3);
+    }
+
+    #[test]
+    fn test_search_filter_to_qdrant_must_should_must_not() {
+        assert!(search_filter_to_qdrant(&SearchFilter::default()).is_none());
+
+        let f = SearchFilter {
+            source: Some("s1".into()),
+            source_type: Some("text".into()),
+            project: Some("p".into()),
+            tags: Some(vec!["a".into(), "b".into()]),
+            tags_should: Some(vec!["c".into()]),
+            tags_must_not: Some(vec!["d".into()]),
+        };
+        let qf = search_filter_to_qdrant(&f).expect("filter");
+        // source + source_type + project + 2 tags must
+        assert_eq!(qf.must.len(), 5);
+        assert_eq!(qf.should.len(), 1);
+        assert_eq!(qf.must_not.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_page_limit_zero() {
+        let core = make_fake_core(2);
+        // Does not need live Qdrant — early return for limit 0.
+        let page = core
+            .search_page(
+                "q",
+                SearchOptions {
+                    limit: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("limit 0");
+        assert!(page.results.is_empty());
+        assert!(!page.has_more);
+        assert_eq!(page.limit, 0);
     }
 
     #[test]

@@ -1,8 +1,11 @@
 use clap::{Parser, Subcommand};
 use lqm_core::RagCore;
 use lqm_core::config::{EmbedderConfig, create_embedder};
-use lqm_core::format_relevant_context;
-use lqm_core::types::{DEFAULT_COLLECTION_NAME, DocumentChunk, PayloadFilter, RagConfig};
+use lqm_core::format_relevant_context_with;
+use lqm_core::types::{
+    ContextOptions, DEFAULT_COLLECTION_NAME, DocumentChunk, PayloadFilter, RagConfig, SearchFilter,
+    SearchOptions,
+};
 use serde_json::Value;
 use std::sync::Arc;
 use turbomcp::prelude::*;
@@ -157,50 +160,69 @@ impl LqmServer {
         }
     }
 
+    /// Semantic search with filters and offset pagination.
     #[tool]
+    #[allow(clippy::too_many_arguments)]
     async fn search(
         &self,
         query: String,
         collection: Option<String>,
         limit: Option<u64>,
+        offset: Option<u64>,
         tags: Option<Vec<String>>,
+        tags_should: Option<Vec<String>>,
+        tags_must_not: Option<Vec<String>>,
+        source: Option<String>,
         source_type: Option<String>,
+        project: Option<String>,
         min_score: Option<f32>,
     ) -> McpResult<Value> {
-        let core = self.core();
-        let coll = collection.clone();
-        match core
-            .search(
+        let page = self
+            .core()
+            .search_page(
                 &query,
-                coll.as_deref(),
-                Some(limit.unwrap_or(10)),
-                tags,
-                source_type.as_deref(),
-                min_score,
+                SearchOptions {
+                    collection: collection.clone(),
+                    limit: Some(limit.unwrap_or(10)),
+                    offset,
+                    min_score,
+                    filter: SearchFilter {
+                        source,
+                        source_type,
+                        project,
+                        tags,
+                        tags_should,
+                        tags_must_not,
+                    },
+                },
             )
             .await
-        {
-            Ok(results) => {
-                let json_results: Vec<Value> = results
-                    .iter()
-                    .map(|r| {
-                        serde_json::json!({
-                            "text": r.text,
-                            "score": r.score,
-                            "payload": r.payload,
-                        })
-                    })
-                    .collect();
-                Ok(serde_json::json!({"results": json_results}))
-            }
-            Err(e) => Err(McpError::internal(format!("search failed: {e}"))),
-        }
+            .map_err(|e| McpError::internal(format!("search failed: {e}")))?;
+
+        let json_results: Vec<Value> = page
+            .results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "text": r.text,
+                    "score": r.score,
+                    "payload": r.payload,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "results": json_results,
+            "offset": page.offset,
+            "limit": page.limit,
+            "has_more": page.has_more,
+            "next_offset": page.next_offset,
+        }))
     }
 
     /// Semantic search formatted as LLM-ready markdown context with citations.
     ///
-    /// Reuses the same search path as `search`, then formats numbered passages with
-    /// score/source metadata plus a structured `sources` array for tooling.
+    /// Shared filters/pagination with `search`. Optional `max_total_chars` budget and
+    /// `mmr` diversity reordering before formatting.
     #[tool]
     #[allow(clippy::too_many_arguments)]
     async fn get_relevant_context(
@@ -208,33 +230,65 @@ impl LqmServer {
         query: String,
         collection: Option<String>,
         limit: Option<u64>,
+        offset: Option<u64>,
         tags: Option<Vec<String>>,
+        tags_should: Option<Vec<String>>,
+        tags_must_not: Option<Vec<String>>,
+        source: Option<String>,
         source_type: Option<String>,
+        project: Option<String>,
         min_score: Option<f32>,
         max_chars_per_passage: Option<u64>,
+        max_total_chars: Option<u64>,
+        mmr: Option<bool>,
+        mmr_lambda: Option<f32>,
     ) -> McpResult<Value> {
-        let core = self.core();
-        let coll = collection.clone();
-        let results = core
-            .search(
+        let coll = collection
+            .clone()
+            .unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        let page = self
+            .core()
+            .search_page(
                 &query,
-                coll.as_deref(),
-                Some(limit.unwrap_or(8)),
-                tags,
-                source_type.as_deref(),
-                min_score,
+                SearchOptions {
+                    collection: Some(coll.clone()),
+                    limit: Some(limit.unwrap_or(8)),
+                    offset,
+                    min_score,
+                    filter: SearchFilter {
+                        source,
+                        source_type,
+                        project,
+                        tags,
+                        tags_should,
+                        tags_must_not,
+                    },
+                },
             )
             .await
             .map_err(|e| McpError::internal(format!("get_relevant_context search failed: {e}")))?;
 
-        let max_chars = max_chars_per_passage.map(|n| n as usize);
-        let formatted = format_relevant_context(&query, &results, max_chars);
+        let formatted = format_relevant_context_with(
+            &query,
+            &page.results,
+            &ContextOptions {
+                max_chars_per_passage: max_chars_per_passage.map(|n| n as usize),
+                max_total_chars: max_total_chars.map(|n| n as usize),
+                mmr: mmr.unwrap_or(false),
+                mmr_lambda,
+            },
+        );
 
         Ok(serde_json::json!({
             "status": "ok",
             "query": query,
-            "collection": collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string()),
+            "collection": coll,
             "passage_count": formatted.passage_count,
+            "truncated_by_budget": formatted.truncated_by_budget,
+            "offset": page.offset,
+            "limit": page.limit,
+            "has_more": page.has_more,
+            "next_offset": page.next_offset,
             "context": formatted.context,
             "sources": formatted.sources,
         }))
@@ -802,15 +856,20 @@ async fn test_all_mcp_tools_live_smoke() {
         "ingest_url chunks: {url_ingested}"
     );
 
-    // 7) search — expect non-empty after ingest
+    // 7) search — expect non-empty after ingest; pagination fields present
     let search = server
         .search(
             "orange kites vector retrieval".to_string(),
             Some(coll.clone()),
             Some(5),
-            None,
-            None,
-            None,
+            None, // offset
+            None, // tags
+            None, // tags_should
+            None, // tags_must_not
+            None, // source
+            None, // source_type
+            None, // project
+            None, // min_score
         )
         .await
         .expect("search");
@@ -823,16 +882,51 @@ async fn test_all_mcp_tools_live_smoke() {
         results[0].get("score").is_some() && results[0].get("text").is_some(),
         "search hit missing score/text: {search}"
     );
+    assert!(
+        search.get("has_more").is_some(),
+        "missing has_more: {search}"
+    );
+    assert!(search.get("offset").is_some(), "missing offset: {search}");
 
-    // 8) get_relevant_context — markdown with passages/scores
-    let ctx = server
-        .get_relevant_context(
-            "vector search curated context".to_string(),
+    // 7b) filtered search by source
+    let filtered = server
+        .search(
+            "orange kites".to_string(),
             Some(coll.clone()),
             Some(5),
             None,
             None,
             None,
+            None,
+            Some("smoke://text".to_string()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("filtered search");
+    assert!(
+        filtered["results"].as_array().is_some(),
+        "filtered search: {filtered}"
+    );
+
+    // 8) get_relevant_context — markdown with passages/scores + budget/mmr fields
+    let ctx = server
+        .get_relevant_context(
+            "vector search curated context".to_string(),
+            Some(coll.clone()),
+            Some(5),
+            None, // offset
+            None, // tags
+            None,
+            None,
+            None, // source
+            None,
+            None,
+            None,        // min_score
+            Some(200),   // max_chars_per_passage
+            Some(4000),  // max_total_chars
+            Some(false), // mmr
             None,
         )
         .await
@@ -848,6 +942,7 @@ async fn test_all_mcp_tools_live_smoke() {
         ctx["passage_count"].as_u64().unwrap_or(0) >= 1,
         "passage_count: {ctx}"
     );
+    assert!(ctx.get("truncated_by_budget").is_some());
 
     // 9) delete_by_source — curation without wiping the collection
     let del_src = server

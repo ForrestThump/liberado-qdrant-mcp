@@ -25,8 +25,8 @@ lqm-mcp serve        → HTTP server (persistent, single model in RAM)
 | `ingest_text` | Embed/upsert a text blob (auto-creates collection); skip/replace by source |
 | `ingest_path` | Walk file/dir via `lqm-ingest` extractors |
 | `ingest_url` | HTTP(S) fetch + HTML/plain extract → chunk/embed/upsert |
-| `search` | Semantic search; raw JSON hits |
-| `get_relevant_context` | Search + markdown passages with scores/sources |
+| `search` | Semantic search; filters (source/project/tags must·should·must_not), offset pagination |
+| `get_relevant_context` | Same filters + markdown passages, char budget, optional MMR |
 | `list_collections` | Collection names |
 | `create_collection` | Create/ensure; dim defaults to active embedder |
 | `delete_collection` | Drop collection |

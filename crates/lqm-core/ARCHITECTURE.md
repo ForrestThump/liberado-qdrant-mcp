@@ -18,10 +18,10 @@ src/
 ├── error.rs     — LqmError enum (Embed, Qdrant, Validation, Io, Other)
 ├── chunking.rs  — ChunkingStrategy, paragraph-aware sliding window chunk_text()
 ├── config.rs    — EmbedderConfig with TOML/env/load_or_default, create_embedder() factory
-├── context.rs   — format_relevant_context() → markdown passages + structured sources
+├── context.rs   — format_relevant_context / _with, mmr_rerank, char budgets
 ├── lifecycle.rs — decide_source_reingest (skip/replace/insert); pure, unit-tested
 ├── embedding.rs — Embedder trait, FakeEmbedder, FastEmbedder/OllamaEmbedder/OpenAIEmbedder (feature-gated)
-└── qdrant.rs    — QdrantClient wrapper, RagCore orchestrator, compute_ingest_hash, lifecycle I/O
+└── qdrant.rs    — QdrantClient wrapper, RagCore orchestrator, search_page, lifecycle I/O
 ```
 
 ## Key design decisions
@@ -30,8 +30,9 @@ src/
 - `compute_ingest_hash()` produces SHA256 hex; re-ingest compares hash multisets per source
 - `embed_and_upsert_batch` returns `IngestReport` (inserted/skipped/replaced/chunks)
 - `list_sources` / `delete_by_source` / `delete_by_filter` share scroll + filter builders
+- `search_page` + `SearchFilter` power filtered retrieval with offset/`has_more` (fetch limit+1)
+- `format_relevant_context_with` supports total char budget + optional MMR diversity
 - `ensure_indexes()` creates keyword indexes on source, source_type, collection, ingest_hash, project, tags
 - `create_collection` / `get_collection_info` / `delete_collection` are first-class on `RagCore` (create defaults vector dim from the active embedder)
-- `format_relevant_context` is pure (no I/O) so MCP/API/CLI can share LLM-ready formatting
 - Embedders are feature-gated (`embed-fastembed`, `embed-ollama`, `embed-openai`)
 - `DEFAULT_COLLECTION_NAME = "default"` — single constant used by all consumers

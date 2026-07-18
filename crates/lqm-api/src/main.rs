@@ -8,7 +8,11 @@ use axum::{
 };
 use clap::Parser;
 use lqm_core::config::{EmbedderConfig, create_embedder};
-use lqm_core::types::{DEFAULT_COLLECTION_NAME, DocumentChunk, PayloadFilter, RagConfig};
+use lqm_core::format_relevant_context_with;
+use lqm_core::types::{
+    ContextOptions, DEFAULT_COLLECTION_NAME, DocumentChunk, PayloadFilter, RagConfig, SearchFilter,
+    SearchOptions,
+};
 use lqm_core::{QdrantClient, RagCore};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -42,9 +46,33 @@ struct SearchBody {
     query: String,
     collection: Option<String>,
     limit: Option<u64>,
+    offset: Option<u64>,
     tags: Option<Vec<String>>,
+    tags_should: Option<Vec<String>>,
+    tags_must_not: Option<Vec<String>>,
+    source: Option<String>,
     source_type: Option<String>,
+    project: Option<String>,
     min_score: Option<f32>,
+}
+
+#[derive(Deserialize)]
+struct ContextBody {
+    query: String,
+    collection: Option<String>,
+    limit: Option<u64>,
+    offset: Option<u64>,
+    tags: Option<Vec<String>>,
+    tags_should: Option<Vec<String>>,
+    tags_must_not: Option<Vec<String>>,
+    source: Option<String>,
+    source_type: Option<String>,
+    project: Option<String>,
+    min_score: Option<f32>,
+    max_chars_per_passage: Option<u64>,
+    max_total_chars: Option<u64>,
+    mmr: Option<bool>,
+    mmr_lambda: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -139,20 +167,24 @@ async fn search(
     State(state): State<AppState>,
     Json(body): Json<SearchBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let collection = body
-        .collection
-        .as_deref()
-        .unwrap_or(DEFAULT_COLLECTION_NAME);
-
-    let results = state
+    let page = state
         .core
-        .search(
+        .search_page(
             &body.query,
-            Some(collection),
-            body.limit,
-            body.tags,
-            body.source_type.as_deref(),
-            body.min_score,
+            SearchOptions {
+                collection: body.collection,
+                limit: body.limit,
+                offset: body.offset,
+                min_score: body.min_score,
+                filter: SearchFilter {
+                    source: body.source,
+                    source_type: body.source_type,
+                    project: body.project,
+                    tags: body.tags,
+                    tags_should: body.tags_should,
+                    tags_must_not: body.tags_must_not,
+                },
+            },
         )
         .await
         .map_err(|e| {
@@ -164,7 +196,76 @@ async fn search(
             )
         })?;
 
-    Ok(Json(serde_json::to_value(results).unwrap_or_default()))
+    Ok(Json(serde_json::json!({
+        "results": page.results,
+        "offset": page.offset,
+        "limit": page.limit,
+        "has_more": page.has_more,
+        "next_offset": page.next_offset,
+    })))
+}
+
+async fn get_relevant_context(
+    State(state): State<AppState>,
+    Json(body): Json<ContextBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let coll = body
+        .collection
+        .clone()
+        .unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+    let page = state
+        .core
+        .search_page(
+            &body.query,
+            SearchOptions {
+                collection: Some(coll.clone()),
+                limit: body.limit.or(Some(8)),
+                offset: body.offset,
+                min_score: body.min_score,
+                filter: SearchFilter {
+                    source: body.source,
+                    source_type: body.source_type,
+                    project: body.project,
+                    tags: body.tags,
+                    tags_should: body.tags_should,
+                    tags_must_not: body.tags_must_not,
+                },
+            },
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    let formatted = format_relevant_context_with(
+        &body.query,
+        &page.results,
+        &ContextOptions {
+            max_chars_per_passage: body.max_chars_per_passage.map(|n| n as usize),
+            max_total_chars: body.max_total_chars.map(|n| n as usize),
+            mmr: body.mmr.unwrap_or(false),
+            mmr_lambda: body.mmr_lambda,
+        },
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "query": body.query,
+        "collection": coll,
+        "passage_count": formatted.passage_count,
+        "truncated_by_budget": formatted.truncated_by_budget,
+        "offset": page.offset,
+        "limit": page.limit,
+        "has_more": page.has_more,
+        "next_offset": page.next_offset,
+        "context": formatted.context,
+        "sources": formatted.sources,
+    })))
 }
 
 async fn ingest(
@@ -402,6 +503,7 @@ fn build_router(state: AppState) -> Router {
             post(delete_by_filter),
         )
         .route("/api/search", post(search))
+        .route("/api/context", post(get_relevant_context))
         .route("/api/ingest", post(ingest))
         .with_state(state);
 

@@ -1,7 +1,8 @@
 //! Agent-friendly formatting of search results as LLM-ready context.
 
-use crate::types::SearchResult;
+use crate::types::{ContextOptions, SearchResult};
 use serde::Serialize;
+use std::collections::HashSet;
 
 /// Structured companion to the markdown context string.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -21,26 +22,55 @@ pub struct FormattedContext {
     /// Compact structured list of sources (for tools that prefer JSON).
     pub sources: Vec<ContextSource>,
     pub passage_count: usize,
+    /// True when max_total_chars stopped us before all candidates were included.
+    pub truncated_by_budget: bool,
 }
 
 /// Format search results into numbered passages with source/citation metadata.
 ///
 /// Empty results produce a short notice so agents never get a blank string.
-/// `max_chars_per_passage` truncates long texts (0 = no truncation).
+/// `max_chars_per_passage` truncates long texts (0 / None = no truncation).
 pub fn format_relevant_context(
     query: &str,
     results: &[SearchResult],
     max_chars_per_passage: Option<usize>,
 ) -> FormattedContext {
-    let max_chars = max_chars_per_passage.unwrap_or(0);
-    if results.is_empty() {
+    format_relevant_context_with(
+        query,
+        results,
+        &ContextOptions {
+            max_chars_per_passage,
+            ..Default::default()
+        },
+    )
+}
+
+/// Format with full context options (budget, optional MMR).
+pub fn format_relevant_context_with(
+    query: &str,
+    results: &[SearchResult],
+    opts: &ContextOptions,
+) -> FormattedContext {
+    let mut working: Vec<SearchResult> = results.to_vec();
+    if opts.mmr && !working.is_empty() {
+        let lambda = opts.mmr_lambda.unwrap_or(0.7).clamp(0.0, 1.0);
+        let k = working.len();
+        working = mmr_rerank(working, k, lambda);
+    }
+
+    let max_chars = opts.max_chars_per_passage.unwrap_or(0);
+    let max_total = opts.max_total_chars.filter(|n| *n > 0);
+
+    if working.is_empty() {
         return FormattedContext {
             context: format!(
-                "# Relevant Context\n\n_No passages matched query: {}_\n",
+                "# Relevant Context\n\n_No passages matched query: {}_\n\n\
+                 _Tip: try a broader query, lower min_score, or clear source/tag filters._\n",
                 escape_md_inline(query)
             ),
             sources: vec![],
             passage_count: 0,
+            truncated_by_budget: false,
         };
     }
 
@@ -48,9 +78,11 @@ pub fn format_relevant_context(
     body.push_str("# Relevant Context\n\n");
     body.push_str(&format!("_Query: {}_\n\n", escape_md_inline(query)));
 
-    let mut sources = Vec::with_capacity(results.len());
+    let mut sources = Vec::new();
+    let mut truncated_by_budget = false;
+    let mut included = 0usize;
 
-    for (i, result) in results.iter().enumerate() {
+    for (i, result) in working.iter().enumerate() {
         let index = i + 1;
         let source = payload_str(&result.payload, "source");
         let source_type = payload_str(&result.payload, "source_type");
@@ -63,20 +95,32 @@ pub fn format_relevant_context(
             result.text.clone()
         };
 
-        body.push_str(&format!("## Passage {index}\n\n"));
-        body.push_str(&format!("- **score**: {:.4}\n", result.score));
+        let mut block = String::new();
+        block.push_str(&format!("## Passage {index}\n\n"));
+        block.push_str(&format!("- **score**: {:.4}\n", result.score));
         if let Some(ref s) = source {
-            body.push_str(&format!("- **source**: `{s}`\n"));
+            block.push_str(&format!("- **source**: `{s}`\n"));
         }
         if let Some(ref st) = source_type {
-            body.push_str(&format!("- **source_type**: `{st}`\n"));
+            block.push_str(&format!("- **source_type**: `{st}`\n"));
         }
         if let Some(ref p) = project {
-            body.push_str(&format!("- **project**: `{p}`\n"));
+            block.push_str(&format!("- **project**: `{p}`\n"));
         }
-        body.push('\n');
-        body.push_str(&passage);
-        body.push_str("\n\n");
+        block.push('\n');
+        block.push_str(&passage);
+        block.push_str("\n\n");
+
+        if let Some(budget) = max_total {
+            // Always try to fit at least one passage; further ones respect the budget.
+            if included > 0 && body.len() + block.len() > budget {
+                truncated_by_budget = true;
+                break;
+            }
+        }
+
+        body.push_str(&block);
+        included += 1;
 
         let preview: String = result.text.chars().take(160).collect();
         sources.push(ContextSource {
@@ -92,11 +136,83 @@ pub fn format_relevant_context(
         });
     }
 
+    if truncated_by_budget {
+        body.push_str("_…additional passages omitted to stay within max_total_chars budget._\n");
+    }
+
     FormattedContext {
         context: body,
         sources,
-        passage_count: results.len(),
+        passage_count: included,
+        truncated_by_budget,
     }
+}
+
+/// Maximal Marginal Relevance over text hits using score + token-set Jaccard.
+///
+/// Pure post-process: does not re-query Qdrant. `lambda` balances relevance (1.0)
+/// vs diversity (0.0).
+pub fn mmr_rerank(results: Vec<SearchResult>, k: usize, lambda: f32) -> Vec<SearchResult> {
+    if results.is_empty() || k == 0 {
+        return vec![];
+    }
+    let k = k.min(results.len());
+    let lambda = lambda.clamp(0.0, 1.0);
+
+    let max_score = results
+        .iter()
+        .map(|r| r.score)
+        .fold(0.0_f32, f32::max)
+        .max(1e-6);
+
+    let mut remaining: Vec<SearchResult> = results;
+    let mut selected: Vec<SearchResult> = Vec::with_capacity(k);
+
+    while selected.len() < k && !remaining.is_empty() {
+        let mut best_idx = 0usize;
+        let mut best_mmr = f32::NEG_INFINITY;
+
+        for (i, cand) in remaining.iter().enumerate() {
+            let rel = cand.score / max_score;
+            let div = if selected.is_empty() {
+                0.0
+            } else {
+                selected
+                    .iter()
+                    .map(|s| token_jaccard(&cand.text, &s.text))
+                    .fold(0.0_f32, f32::max)
+            };
+            let mmr = lambda * rel - (1.0 - lambda) * div;
+            if mmr > best_mmr {
+                best_mmr = mmr;
+                best_idx = i;
+            }
+        }
+        selected.push(remaining.remove(best_idx));
+    }
+    selected
+}
+
+fn token_jaccard(a: &str, b: &str) -> f32 {
+    let ta = tokenize(a);
+    let tb = tokenize(b);
+    if ta.is_empty() && tb.is_empty() {
+        return 1.0;
+    }
+    if ta.is_empty() || tb.is_empty() {
+        return 0.0;
+    }
+    let inter = ta.intersection(&tb).count() as f32;
+    let union = ta.union(&tb).count() as f32;
+    if union == 0.0 { 0.0 } else { inter / union }
+}
+
+fn tokenize(s: &str) -> HashSet<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() > 1)
+        .map(|t| t.to_string())
+        .collect()
 }
 
 fn payload_str(payload: &serde_json::Value, key: &str) -> Option<String> {
@@ -135,6 +251,7 @@ mod tests {
         assert!(fmt.sources.is_empty());
         assert!(fmt.context.contains("No passages matched"));
         assert!(fmt.context.contains("rust ownership"));
+        assert!(fmt.context.contains("broader query") || fmt.context.contains("min_score"));
     }
 
     #[test]
@@ -180,12 +297,84 @@ mod tests {
             "expected ellipsis: {}",
             fmt.context
         );
-        // Full 500-char run must not appear; truncated body is 50 x's + ellipsis.
         assert!(!fmt.context.contains(&long), "full passage leaked");
         assert!(
             fmt.context.contains(&format!("{}…", "x".repeat(50))),
             "expected truncated run in context: {}",
             fmt.context
+        );
+    }
+
+    #[test]
+    fn format_respects_total_char_budget() {
+        let results = vec![
+            hit(
+                "AAAA passage one content that is moderately long.",
+                0.9,
+                "a",
+                "text",
+            ),
+            hit(
+                "BBBB passage two content that is moderately long.",
+                0.8,
+                "b",
+                "text",
+            ),
+            hit(
+                "CCCC passage three content that is moderately long.",
+                0.7,
+                "c",
+                "text",
+            ),
+        ];
+        // Small budget: should not fit all three full passages.
+        let fmt = format_relevant_context_with(
+            "q",
+            &results,
+            &ContextOptions {
+                max_total_chars: Some(280),
+                ..Default::default()
+            },
+        );
+        assert!(fmt.passage_count >= 1);
+        assert!(fmt.passage_count < 3 || fmt.truncated_by_budget);
+        if fmt.truncated_by_budget {
+            assert!(fmt.context.contains("omitted") || fmt.context.contains("budget"));
+        }
+    }
+
+    #[test]
+    fn mmr_prefers_diverse_texts() {
+        let results = vec![
+            hit("cats cats cats feline animals", 1.0, "1", "text"),
+            hit("cats cats cats more felines", 0.99, "2", "text"),
+            hit("quantum computing qubits gates", 0.5, "3", "text"),
+        ];
+        // Low lambda → diversity; quantum doc should enter selection early.
+        let reranked = mmr_rerank(results, 2, 0.2);
+        assert_eq!(reranked.len(), 2);
+        assert_eq!(reranked[0].payload["source"], "1");
+        assert_eq!(
+            reranked[1].payload["source"],
+            "3",
+            "diverse hit should beat near-duplicate: {:?}",
+            reranked
+                .iter()
+                .map(|r| &r.payload["source"])
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn search_filter_empty_detection() {
+        use crate::types::SearchFilter;
+        assert!(SearchFilter::default().is_empty());
+        assert!(
+            !SearchFilter {
+                source: Some("x".into()),
+                ..Default::default()
+            }
+            .is_empty()
         );
     }
 }
