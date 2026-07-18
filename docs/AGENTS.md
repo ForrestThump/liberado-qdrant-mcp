@@ -9,6 +9,8 @@ Headless RAG for LLM agents: **Qdrant + embeddings + MCP/HTTP**. No chat UI.
 | Paste LLM-ready passages with citations | `get_relevant_context` | Raw `search` (unless you post-process yourself) |
 | Inspect scores / build custom prompts | `search` | — |
 | Rare exact tokens dense may bury | `search` with `hybrid=true` (optional `hybrid_alpha`, lower = more keyword) | Expecting pure dense to match nonsense tokens |
+| Isolate one team/project partition | `scope` on ingest + `scope` on search | Relying on freeform tags alone for hard isolation |
+| Cap sensitivity of hits | `clearance` on ingest + `max_clearance` on search | Multi-user auth (not provided — payload isolation only) |
 | Add knowledge from text | `ingest_text` | — |
 | Add a file or vault tree | `ingest_path` | — |
 | Add a webpage | `ingest_url` | — |
@@ -23,6 +25,8 @@ Headless RAG for LLM agents: **Qdrant + embeddings + MCP/HTTP**. No chat UI.
 **Search vs context:** `search` returns JSON hits (`text`, `score`, `payload`) plus pagination (`offset`, `has_more`, `next_offset`). `get_relevant_context` reuses the same filters/pagination, optionally applies MMR and a char budget, and returns markdown with numbered passages and a `sources` array.
 
 **Hybrid retrieval:** set `hybrid=true` on `search` / `get_relevant_context` (or JSON body for HTTP). Core over-fetches dense hits, merges keyword-matching scroll candidates, and fuses with weighted dense + keyword scores and RRF. Response includes `"hybrid": true`. Default remains dense-only when `hybrid` is omitted/false.
+
+**Scoped filtering:** optional payload keys `scope` (exact partition) and `clearance` (`public` | `internal` | `confidential` | `restricted`). Search/context accept `scope` and `max_clearance` (admits that level and all lower). Unscoped search is the default. Delete-by-filter accepts the same constraints. Not multi-user auth — agents pass the scope they are allowed to see.
 
 ## MCP tool matrix ↔ HTTP
 
@@ -117,6 +121,8 @@ Written by the shared upsert path:
 | `importance` | memory weight 0–1 as **string** (memories; survives Qdrant StringValue round-trip) |
 | `last_accessed` | unix seconds string (memories) |
 | `memory_id` | stable memory identifier |
+| `scope` | isolation partition (exact match when filtering) |
+| `clearance` | `public` / `internal` / `confidential` / `restricted` (default `public` on upsert) |
 
 ## Live tests
 

@@ -116,6 +116,8 @@ impl LqmServer {
         project: Option<String>,
         last_modified: Option<String>,
         path_hint: Option<&str>,
+        scope: Option<String>,
+        clearance: Option<String>,
     ) -> Vec<DocumentChunk> {
         let pieces = self.core().chunk_for_ingest(
             text,
@@ -139,6 +141,8 @@ impl LqmServer {
                 total_chunks: Some(total),
                 importance: None,
                 memory_id: None,
+                scope: scope.clone(),
+                clearance: clearance.clone(),
             })
             .collect()
     }
@@ -167,6 +171,8 @@ impl LqmServer {
         tags: Option<Vec<String>>,
         project: Option<String>,
         last_modified: Option<String>,
+        scope: Option<String>,
+        clearance: Option<String>,
     ) -> McpResult<Value> {
         let core = self.core();
         let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
@@ -187,6 +193,8 @@ impl LqmServer {
             project,
             last_modified,
             path_hint.as_deref(),
+            scope,
+            clearance,
         );
         if chunks.is_empty() {
             return Ok(serde_json::json!({
@@ -245,6 +253,8 @@ impl LqmServer {
         min_score: Option<f32>,
         hybrid: Option<bool>,
         hybrid_alpha: Option<f32>,
+        scope: Option<String>,
+        max_clearance: Option<String>,
     ) -> McpResult<Value> {
         let hybrid_on = hybrid.unwrap_or(false);
         let page = self
@@ -263,6 +273,8 @@ impl LqmServer {
                         tags,
                         tags_should,
                         tags_must_not,
+                        scope,
+                        max_clearance,
                     },
                     hybrid: hybrid_on,
                     hybrid_alpha,
@@ -317,6 +329,8 @@ impl LqmServer {
         mmr_lambda: Option<f32>,
         hybrid: Option<bool>,
         hybrid_alpha: Option<f32>,
+        scope: Option<String>,
+        max_clearance: Option<String>,
     ) -> McpResult<Value> {
         let coll = collection
             .clone()
@@ -337,6 +351,8 @@ impl LqmServer {
                         tags,
                         tags_should,
                         tags_must_not,
+                        scope,
+                        max_clearance,
                     },
                     hybrid: hybrid.unwrap_or(false),
                     hybrid_alpha,
@@ -474,6 +490,8 @@ impl LqmServer {
             project,
             None,
             Some(&resolved_source),
+            None,
+            None,
         );
 
         if chunks.is_empty() {
@@ -563,6 +581,8 @@ impl LqmServer {
                             doc.project,
                             doc.last_modified,
                             Some(&display),
+                            None,
+                            None,
                         );
                         file_chunk_count += pieces.len();
                         all_chunks.extend(pieces);
@@ -657,6 +677,8 @@ impl LqmServer {
                     project.clone(),
                     None,
                     None,
+                    None,
+                    None,
                 );
                 let n = pieces.len();
                 all_chunks.extend(pieces);
@@ -685,6 +707,8 @@ impl LqmServer {
                                 project.clone().or(doc.project),
                                 doc.last_modified,
                                 Some(&path),
+                                None,
+                                None,
                             );
                             n += pieces.len();
                             all_chunks.extend(pieces);
@@ -722,6 +746,8 @@ impl LqmServer {
                             project.clone(),
                             None,
                             Some(&url),
+                            None,
+                            None,
                         );
                         let n = pieces.len();
                         all_chunks.extend(pieces);
@@ -891,6 +917,7 @@ impl LqmServer {
 
     /// Delete points matching payload filters (AND of provided fields).
     #[tool]
+    #[allow(clippy::too_many_arguments)]
     async fn delete_by_filter(
         &self,
         collection: Option<String>,
@@ -898,6 +925,8 @@ impl LqmServer {
         source_type: Option<String>,
         project: Option<String>,
         tags: Option<Vec<String>>,
+        scope: Option<String>,
+        max_clearance: Option<String>,
     ) -> McpResult<Value> {
         let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
         let filter = PayloadFilter {
@@ -905,6 +934,8 @@ impl LqmServer {
             source_type,
             project,
             tags,
+            scope,
+            max_clearance,
         };
         match self.core().delete_by_filter(&collection, &filter).await {
             Ok(deleted) => Ok(serde_json::json!({
@@ -1067,6 +1098,8 @@ async fn test_all_mcp_tools_live_smoke() {
             Some(vec!["smoke".to_string()]),
             Some("lqm_smoke".to_string()),
             None,
+            None,
+            None,
         )
         .await
         .expect("ingest_text");
@@ -1086,6 +1119,8 @@ async fn test_all_mcp_tools_live_smoke() {
             Some(coll.clone()),
             Some(vec!["smoke".to_string()]),
             Some("lqm_smoke".to_string()),
+            None,
+            None,
             None,
         )
         .await
@@ -1110,6 +1145,8 @@ async fn test_all_mcp_tools_live_smoke() {
             Some(coll.clone()),
             Some(vec!["smoke".to_string()]),
             Some("lqm_smoke".to_string()),
+            None,
+            None,
             None,
         )
         .await
@@ -1198,6 +1235,8 @@ async fn test_all_mcp_tools_live_smoke() {
             None, // min_score
             None, // hybrid
             None, // hybrid_alpha
+            None, // scope
+            None, // max_clearance
         )
         .await
         .expect("search");
@@ -1233,6 +1272,8 @@ async fn test_all_mcp_tools_live_smoke() {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
         .expect("filtered search");
@@ -1260,6 +1301,8 @@ async fn test_all_mcp_tools_live_smoke() {
             Some(false), // mmr
             None,
             None, // hybrid
+            None,
+            None,
             None,
         )
         .await
@@ -1307,6 +1350,8 @@ async fn test_all_mcp_tools_live_smoke() {
             Some(coll.clone()),
             None,
             Some("text".to_string()),
+            None,
+            None,
             None,
             None,
         )
@@ -1405,6 +1450,8 @@ async fn test_p5_hybrid_live_smoke() {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
         .expect("ingest generic");
@@ -1417,6 +1464,8 @@ async fn test_p5_hybrid_live_smoke() {
             Some("smoke://hybrid-keyword".to_string()),
             Some("text".to_string()),
             Some(coll.to_string()),
+            None,
+            None,
             None,
             None,
             None,
@@ -1439,6 +1488,8 @@ async fn test_p5_hybrid_live_smoke() {
             None,
             Some(true), // hybrid
             Some(0.35), // lean keyword for rare-token queries
+            None,       // scope
+            None,       // max_clearance
         )
         .await
         .expect("hybrid search");
@@ -1456,6 +1507,120 @@ async fn test_p5_hybrid_live_smoke() {
     );
     assert!(results[0].get("score").is_some());
     assert!(results[0].get("payload").is_some() || results[0].get("text").is_some());
+
+    let _ = server.delete_collection(coll.to_string()).await;
+}
+
+/// Scoped filtering: two scopes, search constrained to one (skips if no Qdrant).
+#[tokio::test]
+async fn test_scope_filter_live_smoke() {
+    let Some(server) = live_test_server().await else {
+        return;
+    };
+    let coll = "lqm_smoke_scope_filter";
+    let _ = server.delete_collection(coll.to_string()).await;
+    server
+        .create_collection(coll.to_string(), None)
+        .await
+        .expect("create_collection");
+
+    server
+        .ingest_text(
+            "Alpha scope secret recipe for applesauce.".to_string(),
+            Some("smoke://scope-alpha".to_string()),
+            Some("text".to_string()),
+            Some(coll.to_string()),
+            None,
+            None,
+            None,
+            Some("alpha".to_string()),
+            Some("internal".to_string()),
+        )
+        .await
+        .expect("ingest alpha");
+    server
+        .ingest_text(
+            "Beta scope notes about bananas only.".to_string(),
+            Some("smoke://scope-beta".to_string()),
+            Some("text".to_string()),
+            Some(coll.to_string()),
+            None,
+            None,
+            None,
+            Some("beta".to_string()),
+            Some("public".to_string()),
+        )
+        .await
+        .expect("ingest beta");
+
+    let scoped = server
+        .search(
+            "recipe notes applesauce bananas".to_string(),
+            Some(coll.to_string()),
+            Some(10),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("alpha".to_string()),
+            None,
+        )
+        .await
+        .expect("scoped search");
+    let results = scoped["results"].as_array().expect("results");
+    assert!(!results.is_empty(), "expected alpha hits: {scoped}");
+    for r in results {
+        let t = r["text"].as_str().unwrap_or("");
+        assert!(
+            t.to_lowercase().contains("apple") || t.to_lowercase().contains("alpha"),
+            "cross-scope leak: {t}"
+        );
+        assert!(
+            !t.to_lowercase().contains("banana"),
+            "beta doc leaked into alpha scope: {t}"
+        );
+        if let Some(p) = r.get("payload")
+            && let Some(s) = p.get("scope").and_then(|v| v.as_str())
+        {
+            assert_eq!(s, "alpha", "payload scope: {p}");
+        }
+    }
+
+    let cleared = server
+        .search(
+            "bananas notes".to_string(),
+            Some(coll.to_string()),
+            Some(10),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("beta".to_string()),
+            Some("public".to_string()),
+        )
+        .await
+        .expect("clearance search");
+    let cr = cleared["results"].as_array().expect("results");
+    assert!(!cr.is_empty(), "{cleared}");
+    for r in cr {
+        let t = r["text"].as_str().unwrap_or("");
+        assert!(
+            !t.to_lowercase().contains("applesauce"),
+            "alpha leaked: {t}"
+        );
+    }
 
     let _ = server.delete_collection(coll.to_string()).await;
 }
@@ -1483,6 +1648,8 @@ async fn test_p0_lifecycle_live_smoke() {
             Some(coll.to_string()),
             Some(vec!["p0".to_string()]),
             Some("proj-p0".to_string()),
+            None,
+            None,
             None,
         )
         .await
@@ -1512,6 +1679,8 @@ async fn test_p0_lifecycle_live_smoke() {
             Some(vec!["p0".to_string()]),
             Some("proj-p0".to_string()),
             None,
+            None,
+            None,
         )
         .await
         .expect("skip");
@@ -1527,6 +1696,8 @@ async fn test_p0_lifecycle_live_smoke() {
             Some(coll.to_string()),
             Some(vec!["p0".to_string()]),
             Some("proj-p0".to_string()),
+            None,
+            None,
             None,
         )
         .await
@@ -1554,7 +1725,7 @@ async fn test_p0_lifecycle_live_smoke() {
 
     // delete_by_filter validation
     let bad = server
-        .delete_by_filter(Some(coll.to_string()), None, None, None, None)
+        .delete_by_filter(Some(coll.to_string()), None, None, None, None, None, None)
         .await;
     assert!(bad.is_err(), "empty filter should fail");
 
@@ -1642,6 +1813,8 @@ async fn test_ingest_and_search() {
         total_chunks: Some(1),
         importance: None,
         memory_id: None,
+        scope: None,
+        clearance: None,
     };
     core.embed_and_upsert_batch(vec![chunk])
         .await
@@ -1684,6 +1857,8 @@ async fn test_search_edge_cases() {
         total_chunks: Some(1),
         importance: None,
         memory_id: None,
+        scope: None,
+        clearance: None,
     };
     core.embed_and_upsert_batch(vec![chunk])
         .await
@@ -1737,6 +1912,8 @@ async fn test_multiple_collections_independence() {
         total_chunks: Some(1),
         importance: None,
         memory_id: None,
+        scope: None,
+        clearance: None,
     };
     core.embed_and_upsert_batch(vec![chunk_a])
         .await
@@ -1754,6 +1931,8 @@ async fn test_multiple_collections_independence() {
         total_chunks: Some(1),
         importance: None,
         memory_id: None,
+        scope: None,
+        clearance: None,
     };
     core.embed_and_upsert_batch(vec![chunk_b])
         .await

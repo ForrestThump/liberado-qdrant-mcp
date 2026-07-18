@@ -198,3 +198,21 @@ schema or second index.
 latency, or agents need true sparse BM25 indexes in Qdrant.
 
 ---
+## 013 — Scoped filtering via payload scope + clearance (not multi-user auth)
+
+**Date:** 2026-07-18
+
+**What:** Optional payload fields `scope` (exact partition) and `clearance`
+(public < internal < confidential < restricted). Search and lifecycle filters
+accept `scope` and `max_clearance`. Upsert defaults missing clearance to
+`public`. Unscoped paths remain the default.
+
+**Why:**
+- ROADMAP "clearance-safe scoped filtering" without inventing user accounts.
+- Keyword indexes on `scope`/`clearance` reuse existing Qdrant filter patterns.
+- Pure helpers unit-test inclusion/exclusion offline.
+
+**Revisit if:** true multi-tenant ACLs or host-issued capability tokens are
+required.
+
+---

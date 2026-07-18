@@ -78,7 +78,7 @@ Within a band, list order is the suggested implementation sequence.
 | **P2** | Ingest quality & reporting | Fewer bad chunks; agents can act on per-file errors | **Shipped** |
 | **P3** | MCP ↔ API parity + agent ergonomics | Remaining parity (path/url ingest API, docs, errors) | **Shipped** |
 | **P4** | Memories | Agent long-term notes; valuable but after curation/retrieval | **Shipped** |
-| **P5** | Nice-to-haves | Lower payoff or out of core headless path | **Hybrid shipped**; rest backlog |
+| **P5** | Nice-to-haves | Lower payoff or out of core headless path | **Hybrid + scoped filtering shipped**; rest backlog |
 
 ---
 
@@ -197,12 +197,20 @@ Within a band, list order is the suggested implementation sequence.
 ### Still backlog (not shipped)
 
 - Audio transcription (whisper-rs) — replace audio placeholder
-- Clearance-safe / scoped filtering beyond simple payload tags
 - Dioxus richer SPA (MCP + API remain priority over UI)
 - WASM build of core for browser-side use
 - Chat-with-context tool (only if a host cannot generate itself)
 - Background re-index workers / heavy queues
 - Native Qdrant sparse vectors (optional upgrade; current hybrid is post-query fusion over dense + text)
+
+### Scoped filtering (shipped)
+
+- [x] Payload keys `scope` + `clearance` (indexed); pure helpers in `lqm_core::scope`
+- [x] `SearchFilter` / `PayloadFilter` constraints `scope` + `max_clearance` → Qdrant filters
+- [x] MCP + HTTP ingest/search/context/delete_by_filter thin adapters
+- [x] Live smoke `test_scope_filter_live_smoke` (skip if no Qdrant); README + AGENTS docs
+
+**Done when (met):** agents can exclude other scopes / higher clearances without multi-user auth. ✅
 
 ---
 

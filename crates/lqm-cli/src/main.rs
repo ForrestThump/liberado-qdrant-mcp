@@ -146,6 +146,8 @@ async fn ingest_single_file(
         total_chunks: Some(1),
         importance: None,
         memory_id: None,
+        scope: None,
+        clearance: None,
     };
 
     match core.embed_and_upsert_batch(vec![chunk]).await {

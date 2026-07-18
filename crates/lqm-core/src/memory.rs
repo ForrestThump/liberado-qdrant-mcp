@@ -94,6 +94,8 @@ pub fn memory_note_to_chunk(
         total_chunks: Some(1),
         importance: Some(importance),
         memory_id: Some(memory_id),
+        scope: None,
+        clearance: None,
     }
 }
 
@@ -306,6 +308,8 @@ mod tests {
                 total_chunks: Some(1),
                 importance: Some(0.8),
                 memory_id: Some("id".into()),
+                scope: None,
+                clearance: None,
             },
             0,
             1,

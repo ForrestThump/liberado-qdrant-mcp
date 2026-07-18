@@ -389,6 +389,44 @@ fn keyword_match(key: &str, value: String) -> Condition {
     }
 }
 
+/// Nested must-condition: clearance is one of the allowed levels (OR).
+fn clearance_max_condition(max_clearance: &str) -> Option<Condition> {
+    let levels = crate::scope::allowed_clearance_levels(max_clearance);
+    if levels.is_empty() {
+        return None;
+    }
+    let should: Vec<Condition> = levels
+        .into_iter()
+        .map(|l| keyword_match(payload_schema::CLEARANCE, l.to_string()))
+        .collect();
+    // Nested filter with only `should` → at least one clearance level must match.
+    Some(Condition {
+        condition_one_of: Some(qdrant_client::qdrant::condition::ConditionOneOf::Filter(
+            Filter {
+                must: vec![],
+                should,
+                must_not: vec![],
+                min_should: None,
+            },
+        )),
+    })
+}
+
+fn push_scope_and_clearance(
+    must: &mut Vec<Condition>,
+    scope: Option<&str>,
+    max_clearance: Option<&str>,
+) {
+    if let Some(s) = scope.map(str::trim).filter(|s| !s.is_empty()) {
+        must.push(keyword_match(payload_schema::SCOPE, s.to_string()));
+    }
+    if let Some(max) = max_clearance.map(str::trim).filter(|s| !s.is_empty())
+        && let Some(cond) = clearance_max_condition(max)
+    {
+        must.push(cond);
+    }
+}
+
 /// Build a Qdrant filter from payload fields (AND of all set fields).
 pub fn payload_filter_to_qdrant(f: &PayloadFilter) -> Option<Filter> {
     if f.is_empty() {
@@ -409,6 +447,7 @@ pub fn payload_filter_to_qdrant(f: &PayloadFilter) -> Option<Filter> {
             must.push(keyword_match("tags", t.clone()));
         }
     }
+    push_scope_and_clearance(&mut must, f.scope.as_deref(), f.max_clearance.as_deref());
     if must.is_empty() {
         None
     } else {
@@ -421,7 +460,7 @@ pub fn payload_filter_to_qdrant(f: &PayloadFilter) -> Option<Filter> {
     }
 }
 
-/// Build a Qdrant filter for search (must / should / must_not tag modes).
+/// Build a Qdrant filter for search (must / should / must_not tag modes + scope/clearance).
 pub fn search_filter_to_qdrant(f: &SearchFilter) -> Option<Filter> {
     if f.is_empty() {
         return None;
@@ -454,6 +493,7 @@ pub fn search_filter_to_qdrant(f: &SearchFilter) -> Option<Filter> {
             must_not.push(keyword_match("tags", t.clone()));
         }
     }
+    push_scope_and_clearance(&mut must, f.scope.as_deref(), f.max_clearance.as_deref());
 
     if must.is_empty() && should.is_empty() && must_not.is_empty() {
         None
@@ -812,7 +852,7 @@ impl RagCore {
     ) -> Result<u64, LqmError> {
         if filter.is_empty() {
             return Err(LqmError::Validation(
-                "delete_by_filter requires at least one of source, source_type, project, tags"
+                "delete_by_filter requires at least one of source, source_type, project, tags, scope, max_clearance"
                     .to_string(),
             ));
         }
@@ -850,6 +890,8 @@ impl RagCore {
                         tags,
                         tags_should: None,
                         tags_must_not: None,
+                        scope: None,
+                        max_clearance: None,
                     },
                     hybrid: false,
                     hybrid_alpha: None,
@@ -1148,6 +1190,8 @@ impl RagCore {
                         tags,
                         tags_should: None,
                         tags_must_not: None,
+                        scope: None,
+                        max_clearance: None,
                     },
                     hybrid: false,
                     hybrid_alpha: None,
@@ -1258,6 +1302,25 @@ pub fn build_point_payload(
             serde_json::Value::String(ts.clone()),
         );
     }
+    if let Some(ref scope) = chunk.scope {
+        let s = scope.trim();
+        if !s.is_empty() {
+            payload.insert(
+                payload_schema::SCOPE.to_string(),
+                serde_json::Value::String(s.to_string()),
+            );
+        }
+    }
+    // Always write clearance when set or default to public for clearance-safe filters.
+    let clearance = chunk
+        .clearance
+        .as_deref()
+        .and_then(crate::scope::normalize_clearance)
+        .unwrap_or(crate::scope::DEFAULT_CLEARANCE);
+    payload.insert(
+        payload_schema::CLEARANCE.to_string(),
+        serde_json::Value::String(clearance.to_string()),
+    );
     payload
 }
 
@@ -1319,6 +1382,8 @@ mod tests {
             total_chunks: Some(3),
             importance: None,
             memory_id: None,
+            scope: None,
+            clearance: None,
         };
         let payload = build_point_payload(&chunk, 1, 3, "AllMiniLML6V2");
         assert_eq!(payload[payload_schema::TEXT], "hello");
@@ -1344,6 +1409,8 @@ mod tests {
             total_chunks: Some(1),
             importance: Some(0.85),
             memory_id: Some("m1".into()),
+            scope: None,
+            clearance: None,
         };
         let payload = build_point_payload(&chunk, 0, 1, "fake");
         // Must be a JSON string so Qdrant StringValue path is a no-op identity.
@@ -1379,12 +1446,30 @@ mod tests {
             tags: Some(vec!["a".into(), "b".into()]),
             tags_should: Some(vec!["c".into()]),
             tags_must_not: Some(vec!["d".into()]),
+            scope: Some("team-a".into()),
+            max_clearance: Some("internal".into()),
         };
         let qf = search_filter_to_qdrant(&f).expect("filter");
-        // source + source_type + project + 2 tags must
-        assert_eq!(qf.must.len(), 5);
+        // source + source_type + project + 2 tags + scope + nested clearance must
+        assert_eq!(qf.must.len(), 7);
         assert_eq!(qf.should.len(), 1);
         assert_eq!(qf.must_not.len(), 1);
+
+        // Scope-only excludes empty filter
+        let scoped = search_filter_to_qdrant(&SearchFilter {
+            scope: Some("only-me".into()),
+            ..Default::default()
+        })
+        .expect("scope filter");
+        assert_eq!(scoped.must.len(), 1);
+
+        // Unknown max_clearance adds no clearance condition (strict pure helper rejects in unit tests)
+        let bad_clear = search_filter_to_qdrant(&SearchFilter {
+            max_clearance: Some("nope".into()),
+            ..Default::default()
+        });
+        // empty allowed list → no condition → filter still empty of useful must
+        assert!(bad_clear.is_none());
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ pub mod hybrid;
 pub mod lifecycle;
 pub mod memory;
 pub mod qdrant;
+pub mod scope;
 pub mod types;
 
 pub use api_error::{StructuredError, error_code, http_status, structured_error};
@@ -32,6 +33,10 @@ pub use memory::{
 pub use qdrant::QdrantClient;
 pub use qdrant::RagCore;
 pub use qdrant::build_point_payload;
+pub use scope::{
+    CLEARANCE_LEVELS, DEFAULT_CLEARANCE, allowed_clearance_levels, clearance_allowed,
+    clearance_rank, normalize_clearance, point_in_scope, scope_matches,
+};
 pub use types::{
     ContextOptions, DEFAULT_COLLECTION_NAME, EmbedderInfo, IngestReport, PayloadFilter,
     ReingestAction, SearchFilter, SearchOptions, SearchPage, SourceSummary, payload_schema,

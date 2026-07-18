@@ -60,6 +60,10 @@ struct SearchBody {
     /// Dense + keyword fusion when true (default false = dense-only).
     hybrid: Option<bool>,
     hybrid_alpha: Option<f32>,
+    /// Exact scope partition; excludes other scopes when set.
+    scope: Option<String>,
+    /// Max clearance: public | internal | confidential | restricted.
+    max_clearance: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -81,6 +85,8 @@ struct ContextBody {
     mmr_lambda: Option<f32>,
     hybrid: Option<bool>,
     hybrid_alpha: Option<f32>,
+    scope: Option<String>,
+    max_clearance: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +98,8 @@ struct IngestBody {
     tags: Option<Vec<String>>,
     project: Option<String>,
     last_modified: Option<u64>,
+    scope: Option<String>,
+    clearance: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -106,6 +114,8 @@ struct DeleteByFilterBody {
     source_type: Option<String>,
     project: Option<String>,
     tags: Option<Vec<String>>,
+    scope: Option<String>,
+    max_clearance: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -169,6 +179,8 @@ fn expand_chunks(
     project: Option<String>,
     last_modified: Option<String>,
     path_hint: Option<&str>,
+    scope: Option<String>,
+    clearance: Option<String>,
 ) -> Vec<DocumentChunk> {
     let pieces = core.chunk_for_ingest(
         text,
@@ -192,6 +204,8 @@ fn expand_chunks(
             total_chunks: Some(total),
             importance: None,
             memory_id: None,
+            scope: scope.clone(),
+            clearance: clearance.clone(),
         })
         .collect()
 }
@@ -264,6 +278,8 @@ async fn search(
                     tags: body.tags,
                     tags_should: body.tags_should,
                     tags_must_not: body.tags_must_not,
+                    scope: body.scope,
+                    max_clearance: body.max_clearance,
                 },
                 hybrid: hybrid_on,
                 hybrid_alpha: body.hybrid_alpha,
@@ -306,6 +322,8 @@ async fn get_relevant_context(
                     tags: body.tags,
                     tags_should: body.tags_should,
                     tags_must_not: body.tags_must_not,
+                    scope: body.scope,
+                    max_clearance: body.max_clearance,
                 },
                 hybrid: body.hybrid.unwrap_or(false),
                 hybrid_alpha: body.hybrid_alpha,
@@ -361,6 +379,8 @@ async fn ingest(
         total_chunks: Some(1),
         importance: None,
         memory_id: None,
+        scope: body.scope,
+        clearance: body.clearance,
     };
 
     state
@@ -468,6 +488,8 @@ async fn delete_by_filter(
         source_type: body.source_type,
         project: body.project,
         tags: body.tags,
+        scope: body.scope,
+        max_clearance: body.max_clearance,
     };
     let deleted = state
         .core
@@ -506,6 +528,8 @@ struct IngestManyBody {
     urls: Option<Vec<String>>,
     tags: Option<Vec<String>>,
     project: Option<String>,
+    scope: Option<String>,
+    clearance: Option<String>,
 }
 
 async fn ingest_path(
@@ -573,6 +597,8 @@ async fn ingest_path(
                         doc.project,
                         doc.last_modified,
                         Some(&display),
+                        None,
+                        None,
                     );
                     n += pieces.len();
                     all_chunks.extend(pieces);
@@ -647,6 +673,8 @@ async fn ingest_url(
         body.project,
         None,
         Some(&source),
+        None,
+        None,
     );
     let file_chunks = chunks.len();
     if chunks.is_empty() {
@@ -713,6 +741,8 @@ async fn ingest_many(
                 body.project.clone(),
                 None,
                 None,
+                body.scope.clone(),
+                body.clearance.clone(),
             );
             let n = pieces.len();
             all_chunks.extend(pieces);
@@ -738,6 +768,8 @@ async fn ingest_many(
                             body.project.clone().or(doc.project),
                             doc.last_modified,
                             Some(&path),
+                            body.scope.clone(),
+                            body.clearance.clone(),
                         );
                         n += pieces.len();
                         all_chunks.extend(pieces);
@@ -769,6 +801,8 @@ async fn ingest_many(
                         body.project.clone(),
                         None,
                         Some(&url),
+                        body.scope.clone(),
+                        body.clearance.clone(),
                     );
                     let n = pieces.len();
                     all_chunks.extend(pieces);
@@ -1088,6 +1122,8 @@ mod tests {
                 total_chunks: Some(total),
                 importance: None,
                 memory_id: None,
+                scope: None,
+                clearance: None,
             })
             .collect();
         assert_eq!(chunks[0].chunk_index, Some(0));

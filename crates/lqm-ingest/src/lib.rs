@@ -158,6 +158,8 @@ pub fn extract_file(
         total_chunks: None,
         importance: None,
         memory_id: None,
+        scope: None,
+        clearance: None,
     };
 
     Ok(vec![chunk])

@@ -20,6 +20,10 @@ pub struct DocumentChunk {
     pub importance: Option<f32>,
     /// Stable memory id (written as payload `memory_id`).
     pub memory_id: Option<String>,
+    /// Isolation partition (e.g. team / tenant-like agent scope). Exact match on search.
+    pub scope: Option<String>,
+    /// Sensitivity level: public | internal | confidential | restricted.
+    pub clearance: Option<String>,
 }
 
 impl DocumentChunk {
@@ -43,6 +47,8 @@ impl DocumentChunk {
             total_chunks: None,
             importance: None,
             memory_id: None,
+            scope: None,
+            clearance: None,
         }
     }
 }
@@ -65,6 +71,8 @@ pub mod payload_schema {
     pub const IMPORTANCE: &str = "importance";
     pub const LAST_ACCESSED: &str = "last_accessed";
     pub const MEMORY_ID: &str = "memory_id";
+    pub const SCOPE: &str = "scope";
+    pub const CLEARANCE: &str = "clearance";
 }
 
 /// Snapshot of the active embedder for agents and HTTP clients.
@@ -111,6 +119,10 @@ pub struct PayloadFilter {
     pub source_type: Option<String>,
     pub project: Option<String>,
     pub tags: Option<Vec<String>>,
+    /// Exact scope partition match.
+    pub scope: Option<String>,
+    /// Max clearance level (admits this level and all lower).
+    pub max_clearance: Option<String>,
 }
 
 impl PayloadFilter {
@@ -119,6 +131,16 @@ impl PayloadFilter {
             && self.source_type.is_none()
             && self.project.is_none()
             && self.tags.as_ref().map(|t| t.is_empty()).unwrap_or(true)
+            && self
+                .scope
+                .as_ref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
+            && self
+                .max_clearance
+                .as_ref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
     }
 
     pub fn for_source(source: impl Into<String>) -> Self {
@@ -141,6 +163,10 @@ pub struct SearchFilter {
     pub tags_should: Option<Vec<String>>,
     /// Tags that must not match (Qdrant `must_not`).
     pub tags_must_not: Option<Vec<String>>,
+    /// Exact `scope` payload match — excludes other scopes when set.
+    pub scope: Option<String>,
+    /// Admit points with clearance at or below this level (`public`…`restricted`).
+    pub max_clearance: Option<String>,
 }
 
 impl SearchFilter {
@@ -158,6 +184,16 @@ impl SearchFilter {
                 .tags_must_not
                 .as_ref()
                 .map(|t| t.is_empty())
+                .unwrap_or(true)
+            && self
+                .scope
+                .as_ref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
+            && self
+                .max_clearance
+                .as_ref()
+                .map(|s| s.trim().is_empty())
                 .unwrap_or(true)
     }
 }
@@ -282,4 +318,6 @@ pub const INDEX_FIELDS: &[&str] = &[
     "ingest_hash",
     "project",
     "tags",
+    "scope",
+    "clearance",
 ];
