@@ -12,7 +12,7 @@ embed-fastembed = ["lqm-core/embed-fastembed"]
 
 [dependencies]
 lqm-core = { path = "../lqm-core" }
-lqm-ingest = { path = "../lqm-ingest" }
+lqm-ingest = { path = "../lqm-ingest", features = ["asr-deepinfra"] }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"

@@ -30,8 +30,9 @@ Qdrant points hold **dense vectors + payload**, not a media vault.
   indices, scope/clearance, …), and the embedding.
 - **`source` is a pointer** (file path, URL, or id). Originals stay where they
   already live; agents open them with other MCPs if needed.
-- **Not stored:** PDF/audio/image **binaries**. PDF ingest keeps extracted text
-  only; audio is currently a filterable placeholder until transcription lands.
+- **Not stored:** PDF/audio/image **binaries**. PDF/audio ingest keep extracted
+  or **transcribed text** only (DeepInfra Whisper/Nemotron ASR; optional
+  `audio_placeholder` when ASR key is missing and fallback is enabled).
 
 Search / context return **readable passages + citations**, not raw vectors.
 

@@ -288,3 +288,32 @@ into Qdrant or a side object store.
 gone, or multi-tenant document ACLs require content housed inside the service.
 
 ---
+
+## 017 — Audio via DeepInfra STT (Whisper + Nemotron), not multimodal embeddings
+
+**Date:** 2026-07-18
+
+**What:** Audio file ingest (MCP/API/CLI `extract_file_async`) transcribes via
+DeepInfra multipart inference, then stores **transcript text** + path `source`
+pointer with `source_type=audio`. Configurable backends:
+
+| `LQM_ASR_BACKEND` | Default model slug |
+|-------------------|--------------------|
+| `whisper` (default) | `openai/whisper-large-v3-turbo` |
+| `nemotron` | `nvidia/Nemotron-3.5-ASR-Streaming-Multilingual-0.6b` |
+
+Optional `LQM_ASR_MODEL` overrides the slug. API key: `DEEPINFRA_API_KEY` or
+`DEEPINFRA_TOKEN`. Feature `asr-deepinfra` on `lqm-ingest` (enabled by MCP/API/CLI).
+Without key: fail closed unless `LQM_ASR_FALLBACK_PLACEHOLDER=1`. Sync extract
+still yields `audio_placeholder` for non-async callers / feature-off builds.
+**No streaming mic input; no audio vectors.**
+
+**Why:**
+- Same text RAG path as PDF (hybrid, reconstruction, memories).
+- Dual backends A/B on one HTTP contract (slug only differs).
+- Avoid multimodal embedding indexes that agents cannot read as citations.
+
+**Revisit if:** offline local ASR (whisper-rs) is required, or true streaming
+sessions become an agent need.
+
+---

@@ -202,13 +202,13 @@ Today: `Extractor::extract_text` is **sync**; MCP/API call `extract_file` from a
 
 Implementer: flip each box to `[x]` in **this file** as completed (or track in goal harness plan copy — keep one source of truth).
 
-- [ ] Add `AsrBackend` + env resolution + default slugs; offline unit tests
-- [ ] Implement DeepInfra multipart `transcribe_file` + JSON parse; offline parse tests with fixture JSON
-- [ ] Wire audio extract path to ASR (`source_type=audio`); placeholder policy + feature gate
-- [ ] Enable feature on MCP/API (and CLI if file ingest); async file ingest call sites
-- [ ] Live skip-safe smoke(s) for whisper + nemotron; optional Qdrant search proof
-- [ ] Docs: ROADMAP remove item; ARCHITECTURE / AGENTS / DECISIONS / README / crate ARCHITECTURE
-- [ ] Full CI: fmt, clippy `-D warnings`, `cargo test --workspace`; capture logs under scratch
+- [x] Add `AsrBackend` + env resolution + default slugs; offline unit tests
+- [x] Implement DeepInfra multipart `transcribe_file` + JSON parse; offline parse tests with fixture JSON
+- [x] Wire audio extract path to ASR (`source_type=audio`); placeholder policy + feature gate
+- [x] Enable feature on MCP/API (and CLI if file ingest); async file ingest call sites
+- [x] Live skip-safe smoke(s) for whisper + nemotron; optional Qdrant search proof
+- [x] Docs: ROADMAP remove item; ARCHITECTURE / AGENTS / DECISIONS / README / crate ARCHITECTURE
+- [x] Full CI: fmt, clippy `-D warnings`, `cargo test --workspace`; capture logs under scratch
 
 ---
 

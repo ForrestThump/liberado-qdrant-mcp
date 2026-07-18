@@ -25,8 +25,8 @@ High-level system architecture for `liberado-qdrant-mcp`.
 - `lqm-core` — no MCP/HTTP *frameworks*. Owns chunking, pluggable `Embedder`,
   Qdrant wrapper, payload types, hybrid/memory/scope, semaphore. Binaries
   depend on this.
-- `lqm-ingest` — extractors (text, PDF feature, audio placeholder) + URL fetch
-  (`fetch-url` feature). Returns raw text; core owns chunking.
+- `lqm-ingest` — extractors (text, PDF, DeepInfra audio STT feature) + URL
+  fetch (`fetch-url`). Returns raw text; core owns chunking.
 - `lqm-mcp` — turbomcp tools. Stdio default; `serve` for streamable HTTP.
 - `lqm-cli` — admin bulk ingest / list / delete / bench (same `expand_to_chunks`).
 - `lqm-api` — axum REST parity with MCP + interim static search page.
@@ -39,8 +39,8 @@ High-level system architecture for `liberado-qdrant-mcp`.
 file / dir / text / url
         │
         ▼
-  lqm-ingest extract_text (if path/url)
-        │
+  lqm-ingest extract_file_async (path: text/pdf/audio STT; url: fetch)
+        │  audio → DeepInfra STT → transcript text (source_type=audio)
         ▼
   RagCore::expand_to_chunks  (structure-aware: md / code / paragraphs)
         │
@@ -68,8 +68,9 @@ chunk **`text`** and metadata such as **`source`** (path/URL/id),
 
 Agents retrieve **text + citations**, not raw vectors alone. Opening the
 original media (if still available) is the job of other host tools/MCPs using
-`source` as a handle. PDF ingest stores extracted text only; audio currently
-stores a filterable placeholder until transcription ships.
+`source` as a handle. PDF and audio both store **extracted/transcribed text**
+only (audio via DeepInfra Whisper/Nemotron; optional `audio_placeholder` when
+ASR is unavailable and fallback is enabled).
 
 ### Source reconstruction
 

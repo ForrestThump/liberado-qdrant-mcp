@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 lqm-core = { path = "../lqm-core", features = ["embed-fastembed"] }
-lqm-ingest = { path = "../lqm-ingest", features = ["pdf"] }
+lqm-ingest = { path = "../lqm-ingest", features = ["pdf", "asr-deepinfra"] }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

@@ -644,7 +644,7 @@ async fn ingest_path(
 
     for p in paths {
         let display = p.to_string_lossy().to_string();
-        match lqm_ingest::extract_file(&p, serde_json::json!({})) {
+        match lqm_ingest::extract_file_async(&p, serde_json::json!({})).await {
             Ok(extracted) => {
                 let mut n = 0usize;
                 for doc in extracted {
@@ -806,7 +806,9 @@ async fn ingest_many(
 
     if let Some(paths) = body.paths {
         for path in paths {
-            match lqm_ingest::extract_file(std::path::Path::new(&path), serde_json::json!({})) {
+            match lqm_ingest::extract_file_async(std::path::Path::new(&path), serde_json::json!({}))
+                .await
+            {
                 Ok(extracted) => {
                     let mut n = 0usize;
                     for doc in extracted {

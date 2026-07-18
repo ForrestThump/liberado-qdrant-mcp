@@ -13,6 +13,7 @@ Headless RAG for LLM agents: **Qdrant + embeddings + MCP/HTTP**. No chat UI.
 | Cap sensitivity of hits | `clearance` on ingest + `max_clearance` on search | Multi-user auth (not provided — payload isolation only) |
 | Add knowledge from text | `ingest_text` | — |
 | Add a file or vault tree | `ingest_path` | — |
+| Ingest voice notes / podcasts | `ingest_path` on audio files (DeepInfra STT → `source_type=audio`) | Expecting audio binaries in Qdrant; multimodal embeddings |
 | Add a webpage | `ingest_url` | — |
 | Batch many items | `ingest_many` | N sequential single-item tools when possible |
 | See what is already indexed | `list_sources` | — |
@@ -85,9 +86,21 @@ Errors on HTTP are JSON: `{ "code": "validation_error", "message": "...", "error
 export QDRANT_URL=http://127.0.0.1:6334
 # optional: LQM_CONFIG=/path/to/lqm.toml
 # optional: LQM_HYBRID_KEYWORD_BACKEND=keyword_index|sparse|scroll
+# audio STT (DeepInfra file ASR — feature asr-deepinfra on MCP/API/CLI):
+# export DEEPINFRA_API_KEY=...          # or DEEPINFRA_TOKEN
+# export LQM_ASR_BACKEND=whisper        # default; or nemotron
+# export LQM_ASR_MODEL=openai/whisper-large-v3-turbo  # optional slug override
+# export LQM_ASR_FALLBACK_PLACEHOLDER=1 # optional: placeholder when key missing
 
 lqm-mcp
 ```
+
+**Audio:** `ingest_path` / file items in `ingest_many` use async extract. With
+`DEEPINFRA_API_KEY` (or `TOKEN`), audio extensions are transcribed to text and
+stored as `source_type=audio` (file stays on disk as a pointer only). Without a
+key, ingest **errors** unless `LQM_ASR_FALLBACK_PLACEHOLDER=1` (then
+`audio_placeholder`). Filter real transcripts with `source_type=audio`; exclude
+stubs with `audio_placeholder`.
 
 Claude Desktop `claude_desktop_config.json` sketch:
 

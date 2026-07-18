@@ -549,7 +549,7 @@ impl LqmServer {
 
         for p in paths {
             let display = p.to_string_lossy().to_string();
-            match lqm_ingest::extract_file(&p, serde_json::json!({})) {
+            match lqm_ingest::extract_file_async(&p, serde_json::json!({})).await {
                 Ok(extracted) => {
                     let mut file_chunk_count = 0usize;
                     for doc in extracted {
@@ -670,7 +670,7 @@ impl LqmServer {
         if let Some(paths) = paths {
             for path in paths {
                 let p = std::path::Path::new(&path);
-                match lqm_ingest::extract_file(p, serde_json::json!({})) {
+                match lqm_ingest::extract_file_async(p, serde_json::json!({})).await {
                     Ok(extracted) => {
                         let mut n = 0usize;
                         for doc in extracted {

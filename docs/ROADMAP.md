@@ -38,28 +38,7 @@ are not copied into a blob store. See ARCHITECTURE and DECISIONS.
 
 Do these **in order** unless a deployment constraint forces a jump.
 
-### 1. Real audio transcription (only if needed)
-
-**Why:** Audio paths currently emit `source_type=audio_placeholder` stubs.
-Worth doing **only if** agents ingest voice notes / podcasts into the KB.
-
-**Ship:**
-
-- [ ] Transcribe via whisper-rs or external ASR; store **transcript text**
-      chunks + `source` pointer (same storage model as PDF: text in Qdrant,
-      file stays on disk).
-- [ ] Prefer `source_type=audio` (or equivalent) for real transcripts; keep
-      placeholder filterable or remove once unused.
-- [ ] Feature-gate heavy deps; MCP/API path parity.
-
-**Done when:** an agent can retrieve meaningful audio content by meaning, not
-metadata stubs.
-
-**Skip if:** no audio ingest in your deployment.
-
----
-
-### 2. Offline MCP integration tests
+### 1. Offline MCP integration tests
 
 **Why:** Live smokes skip without Qdrant. PLAN called for turbomcp `channel` +
 `McpTestClient`; hermetic tool tests protect the surface as it grows.

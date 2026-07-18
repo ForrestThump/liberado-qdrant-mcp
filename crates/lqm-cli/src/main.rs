@@ -100,44 +100,48 @@ async fn ingest_single_file(
     path: &Path,
     collection: &str,
     source_type: Option<&str>,
-    extractors: &[Box<dyn lqm_ingest::Extractor>],
+    _extractors: &[Box<dyn lqm_ingest::Extractor>],
 ) {
     let ext = lqm_ingest::extension_lower(path);
-    let extractor = match lqm_ingest::find_extractor(path, extractors) {
-        Some(e) => e,
-        None => {
-            log::info!("skipping unsupported: {ext}");
-            return;
-        }
-    };
+    if lqm_ingest::find_extractor(path, &lqm_ingest::all_extractors()).is_none() {
+        log::info!("skipping unsupported: {ext}");
+        return;
+    }
 
-    let text = match extractor.extract_text(path) {
-        Ok(t) => t,
+    let extracted = match lqm_ingest::extract_file_async(path, serde_json::json!({})).await {
+        Ok(c) => c,
         Err(e) => {
             log::error!("failed to extract {path:?}: {e}");
             return;
         }
     };
 
-    let source = path.to_string_lossy().to_string();
-    let st = source_type
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| extractor.source_type().to_string());
     let modified = file_modified_secs(path);
+    let mut chunks = Vec::new();
+    for doc in extracted {
+        let source = doc
+            .source
+            .clone()
+            .unwrap_or_else(|| path.to_string_lossy().to_string());
+        let st = source_type
+            .map(|s| s.to_string())
+            .or(doc.source_type)
+            .unwrap_or_else(|| lqm_core::constants::SOURCE_TYPE_TEXT.to_string());
+        chunks.extend(core.expand_to_chunks(
+            &doc.text,
+            Some(source.clone()),
+            Some(st),
+            collection.to_string(),
+            None,
+            None,
+            modified.clone(),
+            Some(&source),
+            None,
+            None,
+        ));
+    }
 
-    let chunks = core.expand_to_chunks(
-        &text,
-        Some(source.clone()),
-        Some(st),
-        collection.to_string(),
-        None,
-        None,
-        modified,
-        Some(&source),
-        None,
-        None,
-    );
-
+    let source = path.to_string_lossy().to_string();
     match core.embed_and_upsert_batch(chunks).await {
         Ok(report) => println!(
             "ingested {source}: chunks={} inserted={} skipped={} replaced={}",
