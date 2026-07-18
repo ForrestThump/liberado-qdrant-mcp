@@ -10,6 +10,7 @@ pub mod context;
 pub mod embedding;
 pub mod error;
 pub mod lifecycle;
+pub mod memory;
 pub mod qdrant;
 pub mod types;
 
@@ -19,6 +20,10 @@ pub use context::{
     mmr_rerank,
 };
 pub use lifecycle::decide_source_reingest;
+pub use memory::{
+    DEFAULT_MEMORY_COLLECTION, MEMORY_SOURCE_TYPE, MemoryHit, MemoryNote, blend_memory_score,
+    memory_note_to_chunk, rank_memory_hits,
+};
 pub use qdrant::QdrantClient;
 pub use qdrant::RagCore;
 pub use qdrant::build_point_payload;

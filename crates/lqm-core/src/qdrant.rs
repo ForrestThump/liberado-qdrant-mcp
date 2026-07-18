@@ -991,6 +991,82 @@ impl RagCore {
             model: self.embedder.model().map(|s| s.to_string()),
         }
     }
+
+    /// Persist a long-term agent memory (dedicated collection by default).
+    ///
+    /// Uses the same skip/replace-by-source path as document ingest (`source=memory://id`).
+    /// Returns `(report, effective_memory_id)` — the id is caller-supplied or auto-assigned.
+    pub async fn store_memory(
+        &self,
+        note: crate::memory::MemoryNote,
+        collection: Option<&str>,
+    ) -> Result<(IngestReport, String), LqmError> {
+        if note.text.trim().is_empty() {
+            return Err(LqmError::Validation(
+                "memory text must not be empty".to_string(),
+            ));
+        }
+        let coll = collection.unwrap_or(crate::memory::DEFAULT_MEMORY_COLLECTION);
+        let dim = self.embedder.dimension();
+        self.ensure_collection(coll, dim).await?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let chunk = crate::memory::memory_note_to_chunk(&note, coll, now);
+        let memory_id = chunk
+            .memory_id
+            .clone()
+            .unwrap_or_else(|| format!("mem-{now}"));
+        let report = self.embed_and_upsert_batch(vec![chunk]).await?;
+        Ok((report, memory_id))
+    }
+
+    /// Semantic recall over the memory collection with optional recency/importance blend.
+    pub async fn recall_memories(
+        &self,
+        query: &str,
+        collection: Option<&str>,
+        limit: Option<u64>,
+        use_recency: bool,
+        project: Option<&str>,
+        tags: Option<Vec<String>>,
+    ) -> Result<Vec<crate::memory::MemoryHit>, LqmError> {
+        if query.trim().is_empty() {
+            return Err(LqmError::Validation(
+                "recall query must not be empty".to_string(),
+            ));
+        }
+        let coll = collection.unwrap_or(crate::memory::DEFAULT_MEMORY_COLLECTION);
+        let page = self
+            .search_page(
+                query,
+                SearchOptions {
+                    collection: Some(coll.to_string()),
+                    limit: Some(limit.unwrap_or(8)),
+                    offset: None,
+                    min_score: None,
+                    filter: SearchFilter {
+                        source: None,
+                        source_type: Some(crate::memory::MEMORY_SOURCE_TYPE.to_string()),
+                        project: project.map(|s| s.to_string()),
+                        tags,
+                        tags_should: None,
+                        tags_must_not: None,
+                    },
+                },
+            )
+            .await?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // ~7 day half-life for recency decay
+        let hits = crate::memory::rank_memory_hits(&page.results, now, use_recency, 7.0 * 86_400.0);
+        Ok(hits)
+    }
 }
 
 /// Build the Qdrant payload map for a single chunk (shared schema; unit-tested offline).
@@ -1063,6 +1139,27 @@ pub fn build_point_payload(
         payload_schema::EMBEDDING_MODEL.to_string(),
         serde_json::Value::String(embedding_model.to_string()),
     );
+    if let Some(imp) = chunk.importance {
+        payload.insert(
+            payload_schema::IMPORTANCE.to_string(),
+            serde_json::json!(imp.clamp(0.0, 1.0)),
+        );
+    }
+    if let Some(ref mid) = chunk.memory_id {
+        payload.insert(
+            payload_schema::MEMORY_ID.to_string(),
+            serde_json::Value::String(mid.clone()),
+        );
+    }
+    // last_accessed mirrors timestamp for memories when set
+    if chunk.source_type.as_deref() == Some(crate::memory::MEMORY_SOURCE_TYPE)
+        && let Some(ref ts) = chunk.timestamp
+    {
+        payload.insert(
+            payload_schema::LAST_ACCESSED.to_string(),
+            serde_json::Value::String(ts.clone()),
+        );
+    }
     payload
 }
 
@@ -1122,6 +1219,8 @@ mod tests {
             last_modified: None,
             chunk_index: Some(1),
             total_chunks: Some(3),
+            importance: None,
+            memory_id: None,
         };
         let payload = build_point_payload(&chunk, 1, 3, "AllMiniLML6V2");
         assert_eq!(payload[payload_schema::TEXT], "hello");

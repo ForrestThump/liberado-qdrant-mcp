@@ -160,3 +160,22 @@ on every push to `main`/`session/*` and all PRs to `main`.
   and `Swatinem/rust-cache` for fast incremental builds.
 - System deps (`build-essential`, `libssl-dev`, `pkg-config`) installed
   explicitly so the workflow is self-contained.
+## 011 — Memories as dedicated collection + host-side generation
+
+**Date:** 2026-07-17
+
+**What:** Long-term agent notes live in a default Qdrant collection `memories`
+with `source_type=memory`, stable `source=memory://{memory_id}`, and payload
+fields `importance`, `last_accessed`, `memory_id`. `store_memory` /
+`recall_memories` exist on RagCore, MCP, and HTTP. Recall is semantic search
+plus optional importance/recency re-rank; no server-side LLM generation.
+
+**Why:**
+- Separates preferences/facts from document chunks without a second database.
+- Reuses ingest skip/replace-by-source for idempotent updates.
+- Keeps lqm headless RAG: host agents generate answers; lqm only stores/recalls.
+
+**Revisit if:** agents need multi-turn memory sessions, automatic last_accessed
+touch-on-recall writes, or hybrid sparse+dense over memories only.
+
+---

@@ -6,6 +6,7 @@ use lqm_core::types::{
     ContextOptions, DEFAULT_COLLECTION_NAME, DocumentChunk, PayloadFilter, RagConfig, SearchFilter,
     SearchOptions,
 };
+use lqm_core::{DEFAULT_MEMORY_COLLECTION, MemoryNote};
 use serde_json::Value;
 use std::sync::Arc;
 use turbomcp::prelude::*;
@@ -136,6 +137,8 @@ impl LqmServer {
                 last_modified: last_modified.clone(),
                 chunk_index: Some(i),
                 total_chunks: Some(total),
+                importance: None,
+                memory_id: None,
             })
             .collect()
     }
@@ -770,6 +773,76 @@ impl LqmServer {
         }))
     }
 
+    /// Store a long-term agent memory (default collection `memories`).
+    ///
+    /// Host agent keeps generation; this only persists text + metadata for later recall.
+    #[tool]
+    async fn store_memory(
+        &self,
+        text: String,
+        importance: Option<f32>,
+        tags: Option<Vec<String>>,
+        project: Option<String>,
+        memory_id: Option<String>,
+        collection: Option<String>,
+    ) -> McpResult<Value> {
+        let coll = collection.unwrap_or_else(|| DEFAULT_MEMORY_COLLECTION.to_string());
+        let note = MemoryNote {
+            text,
+            importance,
+            tags,
+            project,
+            memory_id,
+        };
+        match self.core().store_memory(note, Some(&coll)).await {
+            Ok((report, effective_id)) => Ok(serde_json::json!({
+                "status": "ok",
+                "collection": coll,
+                "memory_id": effective_id,
+                "inserted": report.inserted,
+                "skipped": report.skipped,
+                "replaced": report.replaced,
+                "chunks": report.chunks,
+            })),
+            Err(e) => Err(McpError::internal(format!("store_memory failed: {e}"))),
+        }
+    }
+
+    /// Recall memories by semantic similarity; optional recency/importance blend.
+    #[tool]
+    async fn recall_memories(
+        &self,
+        query: String,
+        collection: Option<String>,
+        limit: Option<u64>,
+        use_recency: Option<bool>,
+        project: Option<String>,
+        tags: Option<Vec<String>>,
+    ) -> McpResult<Value> {
+        let coll = collection.unwrap_or_else(|| DEFAULT_MEMORY_COLLECTION.to_string());
+        match self
+            .core()
+            .recall_memories(
+                &query,
+                Some(&coll),
+                limit,
+                use_recency.unwrap_or(true),
+                project.as_deref(),
+                tags,
+            )
+            .await
+        {
+            Ok(hits) => Ok(serde_json::json!({
+                "status": "ok",
+                "collection": coll,
+                "query": query,
+                "count": hits.len(),
+                "memories": hits,
+            })),
+            Err(e) => Err(McpError::internal(format!("recall_memories failed: {e}"))),
+        }
+    }
+
     /// List distinct document sources in a collection (for agent curation).
     #[tool]
     async fn list_sources(&self, collection: Option<String>) -> McpResult<Value> {
@@ -1233,6 +1306,62 @@ async fn test_all_mcp_tools_live_smoke() {
     assert_eq!(gone["exists"], false, "collection should be gone: {gone}");
 }
 
+/// P4 memory store → recall (skips if no Qdrant).
+#[tokio::test]
+async fn test_p4_memory_live_smoke() {
+    let Some(server) = live_test_server().await else {
+        return;
+    };
+    let coll = "lqm_smoke_memories_p4";
+    let _ = server.delete_collection(coll.to_string()).await;
+
+    let store = server
+        .store_memory(
+            "The user prefers concise Rust examples with Qdrant filters.".to_string(),
+            Some(0.85),
+            Some(vec!["prefs".to_string()]),
+            Some("agent".to_string()),
+            Some("pref-rust-style".to_string()),
+            Some(coll.to_string()),
+        )
+        .await
+        .expect("store_memory");
+    assert_eq!(store["status"], "ok", "{store}");
+    assert_eq!(
+        store["memory_id"].as_str(),
+        Some("pref-rust-style"),
+        "effective memory_id: {store}"
+    );
+    assert!(
+        store["chunks"].as_u64().unwrap_or(0) >= 1 || store["skipped"].as_u64().unwrap_or(0) >= 1,
+        "{store}"
+    );
+
+    let recall = server
+        .recall_memories(
+            "Rust code style preferences".to_string(),
+            Some(coll.to_string()),
+            Some(5),
+            Some(true),
+            None,
+            None,
+        )
+        .await
+        .expect("recall_memories");
+    assert_eq!(recall["status"], "ok", "{recall}");
+    let mems = recall["memories"].as_array().expect("memories array");
+    assert!(!mems.is_empty(), "expected recall hits: {recall}");
+    let text = mems[0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.to_lowercase().contains("rust") || text.to_lowercase().contains("qdrant"),
+        "unexpected text: {text}"
+    );
+    assert!(mems[0].get("blended_score").is_some());
+    assert!(mems[0].get("importance").is_some());
+
+    let _ = server.delete_collection(coll.to_string()).await;
+}
+
 /// P0 lifecycle smoke: list_sources, skip/replace, delete_by_source (skips if no Qdrant).
 #[tokio::test]
 async fn test_p0_lifecycle_live_smoke() {
@@ -1413,6 +1542,8 @@ async fn test_ingest_and_search() {
         last_modified: None,
         chunk_index: Some(0),
         total_chunks: Some(1),
+        importance: None,
+        memory_id: None,
     };
     core.embed_and_upsert_batch(vec![chunk])
         .await
@@ -1453,6 +1584,8 @@ async fn test_search_edge_cases() {
         last_modified: None,
         chunk_index: Some(0),
         total_chunks: Some(1),
+        importance: None,
+        memory_id: None,
     };
     core.embed_and_upsert_batch(vec![chunk])
         .await
@@ -1504,6 +1637,8 @@ async fn test_multiple_collections_independence() {
         last_modified: None,
         chunk_index: Some(0),
         total_chunks: Some(1),
+        importance: None,
+        memory_id: None,
     };
     core.embed_and_upsert_batch(vec![chunk_a])
         .await
@@ -1519,6 +1654,8 @@ async fn test_multiple_collections_independence() {
         last_modified: None,
         chunk_index: Some(0),
         total_chunks: Some(1),
+        importance: None,
+        memory_id: None,
     };
     core.embed_and_upsert_batch(vec![chunk_b])
         .await

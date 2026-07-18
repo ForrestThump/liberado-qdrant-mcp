@@ -14,7 +14,7 @@ use lqm_core::types::{
     ContextOptions, DEFAULT_COLLECTION_NAME, DocumentChunk, PayloadFilter, RagConfig, SearchFilter,
     SearchOptions,
 };
-use lqm_core::{QdrantClient, RagCore};
+use lqm_core::{DEFAULT_MEMORY_COLLECTION, MemoryNote, QdrantClient, RagCore};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -185,6 +185,8 @@ fn expand_chunks(
             last_modified: last_modified.clone(),
             chunk_index: Some(i),
             total_chunks: Some(total),
+            importance: None,
+            memory_id: None,
         })
         .collect()
 }
@@ -346,6 +348,8 @@ async fn ingest(
         last_modified: body.last_modified.map(|ts| ts.to_string()),
         chunk_index: Some(0),
         total_chunks: Some(1),
+        importance: None,
+        memory_id: None,
     };
 
     state
@@ -796,6 +800,84 @@ async fn ingest_many(
     })))
 }
 
+#[derive(Deserialize)]
+struct StoreMemoryBody {
+    text: String,
+    importance: Option<f32>,
+    tags: Option<Vec<String>>,
+    project: Option<String>,
+    memory_id: Option<String>,
+    collection: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RecallMemoriesBody {
+    query: String,
+    collection: Option<String>,
+    limit: Option<u64>,
+    use_recency: Option<bool>,
+    project: Option<String>,
+    tags: Option<Vec<String>>,
+}
+
+async fn store_memory(
+    State(state): State<AppState>,
+    Json(body): Json<StoreMemoryBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let coll = body
+        .collection
+        .unwrap_or_else(|| DEFAULT_MEMORY_COLLECTION.to_string());
+    let note = MemoryNote {
+        text: body.text,
+        importance: body.importance,
+        tags: body.tags,
+        project: body.project,
+        memory_id: body.memory_id,
+    };
+    let (report, effective_id) = state
+        .core
+        .store_memory(note, Some(&coll))
+        .await
+        .map_err(map_lqm_err)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "collection": coll,
+        "memory_id": effective_id,
+        "inserted": report.inserted,
+        "skipped": report.skipped,
+        "replaced": report.replaced,
+        "chunks": report.chunks,
+    })))
+}
+
+async fn recall_memories(
+    State(state): State<AppState>,
+    Json(body): Json<RecallMemoriesBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let coll = body
+        .collection
+        .unwrap_or_else(|| DEFAULT_MEMORY_COLLECTION.to_string());
+    let hits = state
+        .core
+        .recall_memories(
+            &body.query,
+            Some(&coll),
+            body.limit,
+            body.use_recency.unwrap_or(true),
+            body.project.as_deref(),
+            body.tags,
+        )
+        .await
+        .map_err(map_lqm_err)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "collection": coll,
+        "query": body.query,
+        "count": hits.len(),
+        "memories": hits,
+    })))
+}
+
 async fn index_html() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../static/index.html"))
 }
@@ -874,6 +956,8 @@ fn build_router(state: AppState) -> Router {
         .route("/api/ingest/path", post(ingest_path))
         .route("/api/ingest/url", post(ingest_url))
         .route("/api/ingest/many", post(ingest_many))
+        .route("/api/memories", post(store_memory))
+        .route("/api/memories/recall", post(recall_memories))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer,
@@ -991,6 +1075,8 @@ mod tests {
                 last_modified: None,
                 chunk_index: Some(i),
                 total_chunks: Some(total),
+                importance: None,
+                memory_id: None,
             })
             .collect();
         assert_eq!(chunks[0].chunk_index, Some(0));

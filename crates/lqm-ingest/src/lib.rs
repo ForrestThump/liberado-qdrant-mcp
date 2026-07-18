@@ -156,6 +156,8 @@ pub fn extract_file(
             .map(|s| s.to_string()),
         chunk_index: None,
         total_chunks: None,
+        importance: None,
+        memory_id: None,
     };
 
     Ok(vec![chunk])

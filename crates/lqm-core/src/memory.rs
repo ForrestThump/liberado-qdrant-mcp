@@ -1,0 +1,345 @@
+//! Long-term agent memories: schema helpers and recency/importance ranking.
+//!
+//! Memories live in a dedicated collection by default (`DEFAULT_MEMORY_COLLECTION`)
+//! with `source_type = "memory"` so they stay distinguishable from document chunks.
+//! Generation stays in the host agent — this module only store/recall.
+
+use crate::types::{DocumentChunk, SearchResult, payload_schema};
+use serde::{Deserialize, Serialize};
+
+/// Default Qdrant collection for agent memories.
+pub const DEFAULT_MEMORY_COLLECTION: &str = "memories";
+
+/// Payload / source_type marker for memory points.
+pub const MEMORY_SOURCE_TYPE: &str = "memory";
+
+/// Extra payload keys for memories (in addition to standard ingest keys).
+pub mod memory_payload {
+    pub const IMPORTANCE: &str = "importance";
+    pub const LAST_ACCESSED: &str = "last_accessed";
+    pub const MEMORY_ID: &str = "memory_id";
+}
+
+/// Input for storing one memory note.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryNote {
+    pub text: String,
+    /// 0.0–1.0 importance; default 0.5 when omitted at the API layer.
+    pub importance: Option<f32>,
+    pub tags: Option<Vec<String>>,
+    pub project: Option<String>,
+    /// Optional stable id; becomes `source` / `memory_id` for idempotent replace.
+    pub memory_id: Option<String>,
+}
+
+/// One recalled memory with ranking metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryHit {
+    pub text: String,
+    /// Base semantic score from the vector search.
+    pub score: f32,
+    /// Score after optional recency/importance blend.
+    pub blended_score: f32,
+    pub importance: Option<f32>,
+    pub last_accessed: Option<String>,
+    pub memory_id: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub project: Option<String>,
+    pub payload: serde_json::Value,
+}
+
+/// Build a `DocumentChunk` for the memory collection with stable schema fields.
+///
+/// Pure helper — does not touch Qdrant.
+pub fn memory_note_to_chunk(
+    note: &MemoryNote,
+    collection: &str,
+    now_unix_secs: u64,
+) -> DocumentChunk {
+    let importance = note.importance.unwrap_or(0.5).clamp(0.0, 1.0);
+    let memory_id = note
+        .memory_id
+        .clone()
+        .unwrap_or_else(|| format!("mem-{}", now_unix_secs));
+    let source = format!("memory://{memory_id}");
+
+    DocumentChunk {
+        text: note.text.clone(),
+        source: Some(source),
+        source_type: Some(MEMORY_SOURCE_TYPE.to_string()),
+        collection: Some(collection.to_string()),
+        tags: note.tags.clone(),
+        timestamp: Some(now_unix_secs.to_string()),
+        project: note.project.clone(),
+        last_modified: Some(now_unix_secs.to_string()),
+        chunk_index: Some(0),
+        total_chunks: Some(1),
+        importance: Some(importance),
+        memory_id: Some(memory_id),
+    }
+}
+
+/// Attach memory-specific payload fields (importance, last_accessed, memory_id) as a
+/// JSON map merge helper for tests / docs. Production store path uses DocumentChunk
+/// tags/project and sets these keys on the point after `build_point_payload`.
+pub fn memory_extra_payload(
+    importance: f32,
+    last_accessed_unix: u64,
+    memory_id: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut m = serde_json::Map::new();
+    m.insert(
+        memory_payload::IMPORTANCE.to_string(),
+        serde_json::json!(importance.clamp(0.0, 1.0)),
+    );
+    m.insert(
+        memory_payload::LAST_ACCESSED.to_string(),
+        serde_json::Value::String(last_accessed_unix.to_string()),
+    );
+    m.insert(
+        memory_payload::MEMORY_ID.to_string(),
+        serde_json::Value::String(memory_id.to_string()),
+    );
+    m
+}
+
+/// Merge memory extras into a full point payload built by `build_point_payload`.
+pub fn merge_memory_into_payload(
+    mut payload: serde_json::Map<String, serde_json::Value>,
+    importance: f32,
+    last_accessed_unix: u64,
+    memory_id: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let extra = memory_extra_payload(importance, last_accessed_unix, memory_id);
+    for (k, v) in extra {
+        payload.insert(k, v);
+    }
+    // Ensure source_type is memory even if caller omitted it.
+    payload.insert(
+        payload_schema::SOURCE_TYPE.to_string(),
+        serde_json::Value::String(MEMORY_SOURCE_TYPE.to_string()),
+    );
+    payload
+}
+
+/// Parse unix seconds from a string payload field.
+pub fn parse_unix_secs(s: Option<&str>) -> Option<u64> {
+    s.and_then(|v| v.parse().ok())
+}
+
+/// Blend semantic score with importance and recency.
+///
+/// All components in ~[0,1]. `now_unix` and `last_accessed` are unix seconds.
+/// `half_life_secs` controls recency decay (larger = slower decay).
+///
+/// `blended = w_sem * score + w_imp * importance + w_rec * recency`
+/// with weights defaulting to 0.6 / 0.25 / 0.15 when `use_recency` is true.
+pub fn blend_memory_score(
+    semantic_score: f32,
+    importance: f32,
+    last_accessed_unix: Option<u64>,
+    now_unix: u64,
+    use_recency: bool,
+    half_life_secs: f32,
+) -> f32 {
+    let imp = importance.clamp(0.0, 1.0);
+    // Cosine scores are often ~0..1; clamp for safety.
+    let sem = semantic_score.clamp(0.0, 1.0);
+
+    if !use_recency {
+        // Importance-aware only: mostly semantic, light importance nudge.
+        return 0.75 * sem + 0.25 * imp;
+    }
+
+    let half = half_life_secs.max(1.0);
+    let recency = match last_accessed_unix {
+        Some(ts) => {
+            let age = now_unix.saturating_sub(ts) as f32;
+            // Exponential decay: 1 at age 0, 0.5 at half_life.
+            (-(age / half) * std::f32::consts::LN_2)
+                .exp()
+                .clamp(0.0, 1.0)
+        }
+        None => 0.0,
+    };
+
+    0.60 * sem + 0.25 * imp + 0.15 * recency
+}
+
+/// Convert search hits into `MemoryHit`s and optionally re-sort by blended score.
+pub fn rank_memory_hits(
+    results: &[SearchResult],
+    now_unix: u64,
+    use_recency: bool,
+    half_life_secs: f32,
+) -> Vec<MemoryHit> {
+    let mut hits: Vec<MemoryHit> = results
+        .iter()
+        .map(|r| {
+            let importance = r
+                .payload
+                .get(memory_payload::IMPORTANCE)
+                .and_then(|v| v.as_f64())
+                .map(|f| f as f32)
+                .unwrap_or(0.5);
+            let last_accessed = r
+                .payload
+                .get(memory_payload::LAST_ACCESSED)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let last_ts = parse_unix_secs(last_accessed.as_deref());
+            let blended = blend_memory_score(
+                r.score,
+                importance,
+                last_ts,
+                now_unix,
+                use_recency,
+                half_life_secs,
+            );
+            let memory_id = r
+                .payload
+                .get(memory_payload::MEMORY_ID)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    r.payload
+                        .get(payload_schema::SOURCE)
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim_start_matches("memory://").to_string())
+                });
+            let tags = r.payload.get(payload_schema::TAGS).and_then(|v| {
+                v.as_array().map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+            });
+            let project = r
+                .payload
+                .get(payload_schema::PROJECT)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            MemoryHit {
+                text: r.text.clone(),
+                score: r.score,
+                blended_score: blended,
+                importance: Some(importance),
+                last_accessed,
+                memory_id,
+                tags,
+                project,
+                payload: r.payload.clone(),
+            }
+        })
+        .collect();
+
+    if use_recency {
+        hits.sort_by(|a, b| {
+            b.blended_score
+                .partial_cmp(&a.blended_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    hits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn memory_note_to_chunk_sets_schema() {
+        let note = MemoryNote {
+            text: "User prefers dark mode".into(),
+            importance: Some(0.9),
+            tags: Some(vec!["prefs".into()]),
+            project: Some("ui".into()),
+            memory_id: Some("pref-dark".into()),
+        };
+        let chunk = memory_note_to_chunk(&note, DEFAULT_MEMORY_COLLECTION, 1_700_000_000);
+        assert_eq!(chunk.text, "User prefers dark mode");
+        assert_eq!(chunk.collection.as_deref(), Some(DEFAULT_MEMORY_COLLECTION));
+        assert_eq!(chunk.source_type.as_deref(), Some(MEMORY_SOURCE_TYPE));
+        assert_eq!(chunk.source.as_deref(), Some("memory://pref-dark"));
+        assert_eq!(chunk.project.as_deref(), Some("ui"));
+        assert_eq!(chunk.tags.as_ref().unwrap(), &vec!["prefs".to_string()]);
+        assert_eq!(chunk.chunk_index, Some(0));
+        assert_eq!(chunk.total_chunks, Some(1));
+    }
+
+    #[test]
+    fn merge_memory_payload_has_keys() {
+        let base = crate::qdrant::build_point_payload(
+            &DocumentChunk {
+                text: "x".into(),
+                source: Some("memory://id".into()),
+                source_type: Some(MEMORY_SOURCE_TYPE.into()),
+                collection: Some(DEFAULT_MEMORY_COLLECTION.into()),
+                tags: None,
+                timestamp: None,
+                project: None,
+                last_modified: None,
+                chunk_index: Some(0),
+                total_chunks: Some(1),
+                importance: Some(0.8),
+                memory_id: Some("id".into()),
+            },
+            0,
+            1,
+            "fake",
+        );
+        let merged = merge_memory_into_payload(base, 0.8, 100, "id");
+        assert!((merged[memory_payload::IMPORTANCE].as_f64().unwrap() - 0.8).abs() < 1e-5);
+        assert_eq!(merged[memory_payload::LAST_ACCESSED], "100");
+        assert_eq!(merged[memory_payload::MEMORY_ID], "id");
+        assert_eq!(merged[payload_schema::SOURCE_TYPE], MEMORY_SOURCE_TYPE);
+    }
+
+    #[test]
+    fn blend_higher_importance_wins_without_recency() {
+        let low = blend_memory_score(0.9, 0.1, None, 1000, false, 86400.0);
+        let high = blend_memory_score(0.9, 0.9, None, 1000, false, 86400.0);
+        assert!(high > low, "high={high} low={low}");
+    }
+
+    #[test]
+    fn blend_recent_outranks_stale_at_same_sem_imp() {
+        let now = 10_000_000_u64;
+        let recent = blend_memory_score(0.8, 0.5, Some(now - 60), now, true, 86_400.0);
+        let stale = blend_memory_score(0.8, 0.5, Some(now - 30 * 86_400), now, true, 86_400.0);
+        assert!(recent > stale, "recent={recent} stale={stale}");
+    }
+
+    #[test]
+    fn rank_memory_hits_orders_by_blend() {
+        let now = 10_000_000_u64;
+        let results = vec![
+            SearchResult {
+                text: "old".into(),
+                score: 0.9,
+                payload: json!({
+                    "importance": 0.5,
+                    "last_accessed": "100",
+                    "memory_id": "old",
+                    "source": "memory://old",
+                }),
+            },
+            SearchResult {
+                text: "new".into(),
+                score: 0.9,
+                payload: json!({
+                    "importance": 0.5,
+                    "last_accessed": now.to_string(),
+                    "memory_id": "new",
+                    "source": "memory://new",
+                }),
+            },
+        ];
+        let ranked = rank_memory_hits(&results, now, true, 86_400.0);
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].text, "new");
+        assert!(ranked[0].blended_score >= ranked[1].blended_score);
+    }
+}

@@ -16,6 +16,8 @@ Headless RAG for LLM agents: **Qdrant + embeddings + MCP/HTTP**. No chat UI.
 | Remove one document | `delete_by_source` | `delete_collection` (wipes everything) |
 | Create a scoped KB | `create_collection` | — |
 | Check embedder dim/model | `get_embedder_info` | Guessing dims from docs alone |
+| Save a long-term preference/fact | `store_memory` | Putting prefs into a random doc collection without `source_type=memory` |
+| Retrieve past prefs/facts by meaning | `recall_memories` (optional `use_recency`) | Full-collection `search` without memory filter |
 
 **Search vs context:** `search` returns JSON hits (`text`, `score`, `payload`) plus pagination (`offset`, `has_more`, `next_offset`). `get_relevant_context` reuses the same filters/pagination, optionally applies MMR and a char budget, and returns markdown with numbered passages and a `sources` array.
 
@@ -37,8 +39,18 @@ Headless RAG for LLM agents: **Qdrant + embeddings + MCP/HTTP**. No chat UI.
 | `delete_by_source` | `DELETE /api/collections/{name}/sources/{source}` |
 | `delete_by_filter` | `POST /api/collections/{name}/delete_by_filter` |
 | `get_embedder_info` | `GET /api/embedder` |
+| `store_memory` | `POST /api/memories` |
+| `recall_memories` | `POST /api/memories/recall` |
 
 Errors on HTTP are JSON: `{ "code": "validation_error", "message": "...", "error": "..." }` (`error` mirrors `message` for older clients).
+
+### Memories
+
+- Default collection: **`memories`** (`DEFAULT_MEMORY_COLLECTION`)
+- Points use `source_type=memory`, `source=memory://{memory_id}`, plus `importance` (0–1), `last_accessed` (unix secs string), `memory_id`
+- `store_memory` reuses skip/replace-by-source (same id+text → skip; same id new text → replace)
+- `recall_memories` semantic search filtered to `source_type=memory`; `use_recency=true` re-ranks with importance + exponential recency blend (host still generates answers)
+- Generation is **not** performed server-side
 
 ## Run modes
 
@@ -99,6 +111,9 @@ Written by the shared upsert path:
 | `chunk_index` | 0-based index in parent doc |
 | `total_chunks` | parent doc chunk count |
 | `embedding_model` | model name or embedder id |
+| `importance` | memory weight 0–1 (memories only) |
+| `last_accessed` | unix seconds string (memories) |
+| `memory_id` | stable memory identifier |
 
 ## Live tests
 

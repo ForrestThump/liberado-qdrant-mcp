@@ -20,8 +20,9 @@ src/
 ├── config.rs    — EmbedderConfig with TOML/env/load_or_default, create_embedder() factory
 ├── context.rs   — format_relevant_context / _with, mmr_rerank, char budgets
 ├── lifecycle.rs — decide_source_reingest (skip/replace/insert); pure, unit-tested
+├── memory.rs    — MemoryNote/Hit, DEFAULT_MEMORY_COLLECTION, recency/importance blend ranking
 ├── embedding.rs — Embedder trait, FakeEmbedder, FastEmbedder/OllamaEmbedder/OpenAIEmbedder (feature-gated)
-└── qdrant.rs    — QdrantClient wrapper, RagCore orchestrator, search_page, lifecycle I/O
+└── qdrant.rs    — QdrantClient wrapper, RagCore orchestrator, search_page, lifecycle I/O, store/recall_memory
 ```
 
 ## Key design decisions
@@ -36,3 +37,4 @@ src/
 - `create_collection` / `get_collection_info` / `delete_collection` are first-class on `RagCore` (create defaults vector dim from the active embedder)
 - Embedders are feature-gated (`embed-fastembed`, `embed-ollama`, `embed-openai`)
 - `DEFAULT_COLLECTION_NAME = "default"` — single constant used by all consumers
+- Memories default to collection `memories` with `source_type=memory` and `source=memory://{id}`; store reuses skip/replace; recall post-processes with optional recency blend (generation stays host-side)

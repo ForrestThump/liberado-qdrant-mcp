@@ -77,8 +77,8 @@ Within a band, list order is the suggested implementation sequence.
 | **P1** | Richer retrieval | Better filters/pagination/context budget → better answers without more product | **Shipped** |
 | **P2** | Ingest quality & reporting | Fewer bad chunks; agents can act on per-file errors | **Shipped** |
 | **P3** | MCP ↔ API parity + agent ergonomics | Remaining parity (path/url ingest API, docs, errors) | **Shipped** |
-| **P4** | Memories | Agent long-term notes; valuable but after curation/retrieval | Next |
-| **P5** | Nice-to-haves | Lower payoff or out of core headless path | Open |
+| **P4** | Memories | Agent long-term notes; valuable but after curation/retrieval | **Shipped** |
+| **P5** | Nice-to-haves | Lower payoff or out of core headless path | Next |
 
 ---
 
@@ -163,13 +163,21 @@ Within a band, list order is the suggested implementation sequence.
 
 ---
 
-## P4 — Memories (do next)
+## P4 — Memories (shipped)
 
-*Valuable for long-running agents; weaker leverage until P0–P1 exist.*
+*Long-term agent notes; generation stays in the host agent.*
 
-- [ ] Memory schema (dedicated collection or `source_type=memory` + `importance` / `last_accessed`)
-- [ ] `store_memory` / `recall_memories` (semantic + optional recency)
-- [ ] Keep generation in the host agent (no required chat-with-workspace tool)
+- [x] Memory schema — default collection `memories`, `source_type=memory`, payload `importance` / `last_accessed` / `memory_id`
+- [x] `store_memory` / `recall_memories` on RagCore + MCP + HTTP (`POST /api/memories`, `POST /api/memories/recall`)
+- [x] Optional recency blend (`use_recency`, half-life post-process over semantic scores)
+- [x] Pure unit tests for payload + blend ranking; live smoke `test_p4_memory_live_smoke` (skip if no Qdrant)
+
+**Done when:** agents can store notes and recall them by query without a chat-with-workspace tool. ✅
+
+### Phase P4 notes
+
+- Constants: `DEFAULT_MEMORY_COLLECTION`, `MEMORY_SOURCE_TYPE` in `lqm_core::memory`
+- Replace-by-source: same text+id re-ingest skips; changed text replaces via `memory://{id}` source
 
 ---
 

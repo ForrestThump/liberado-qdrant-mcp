@@ -16,6 +16,10 @@ pub struct DocumentChunk {
     pub chunk_index: Option<usize>,
     /// Total chunks produced for the parent document (when known).
     pub total_chunks: Option<usize>,
+    /// Memory importance 0.0–1.0 (only for `source_type=memory`).
+    pub importance: Option<f32>,
+    /// Stable memory id (written as payload `memory_id`).
+    pub memory_id: Option<String>,
 }
 
 impl DocumentChunk {
@@ -37,6 +41,8 @@ impl DocumentChunk {
             last_modified: None,
             chunk_index: None,
             total_chunks: None,
+            importance: None,
+            memory_id: None,
         }
     }
 }
@@ -56,6 +62,9 @@ pub mod payload_schema {
     pub const CHUNK_INDEX: &str = "chunk_index";
     pub const TOTAL_CHUNKS: &str = "total_chunks";
     pub const EMBEDDING_MODEL: &str = "embedding_model";
+    pub const IMPORTANCE: &str = "importance";
+    pub const LAST_ACCESSED: &str = "last_accessed";
+    pub const MEMORY_ID: &str = "memory_id";
 }
 
 /// Snapshot of the active embedder for agents and HTTP clients.
