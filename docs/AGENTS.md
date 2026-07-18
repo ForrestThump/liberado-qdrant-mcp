@@ -111,7 +111,7 @@ Written by the shared upsert path:
 | `chunk_index` | 0-based index in parent doc |
 | `total_chunks` | parent doc chunk count |
 | `embedding_model` | model name or embedder id |
-| `importance` | memory weight 0–1 (memories only) |
+| `importance` | memory weight 0–1 as **string** (memories; survives Qdrant StringValue round-trip) |
 | `last_accessed` | unix seconds string (memories) |
 | `memory_id` | stable memory identifier |
 
