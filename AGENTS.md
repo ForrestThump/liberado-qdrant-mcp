@@ -23,6 +23,7 @@ docs/
   DECISIONS.md     ← why we chose what we chose
   AUDIT.md         ← audit findings and fix status
   AGENTS.md        ← MCP↔HTTP tool matrix for host agents
+  plans/           ← executable implementation plans for /goal (acceptance + verification)
 
 liberado-qdrant-mcp_vs_AnythingLLM_Analysis_and_Implementation_Roadmap.md
                    ← gap map vs AnythingLLM knowledge/MCP layer
