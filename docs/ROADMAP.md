@@ -53,50 +53,55 @@ targets ~80%+ of the AnythingLLM agent knowledge path without product surface.
 - Live `test_all_mcp_tools_live_smoke` against real Qdrant
 - Search `limit=0` → empty results (Qdrant-safe)
 
-**Still partial after Phase 1:** `ingest_hash` is stored/indexed but **not** used
-to skip or replace duplicates; document lifecycle tools are missing; HTTP API
-lags MCP.
+### Phase P0 — Document lifecycle + true idempotency (shipped)
+
+- **Source lifecycle (core)** — `list_sources`, `delete_by_source`, `delete_by_filter` (tags / source_type / project); scroll + count helpers
+- **Re-ingest policy** — same source + same hash multiset → skip; different → delete source then upsert; `IngestReport { inserted, skipped, replaced, chunks }`
+- **MCP** — `list_sources`, `delete_by_source`, `delete_by_filter`; ingest tools return accounting fields
+- **HTTP API** — create/info collection; list/delete sources; delete_by_filter; ingest stats
+- **Live smoke** — `test_p0_lifecycle_live_smoke` + extended `test_all_mcp_tools_live_smoke`
+- Indexes: `project` + `tags` added to auto-created keyword indexes
+
+**Done when (met):** an agent can fully manage a throwaway KB without `delete_collection`.
 
 ---
 
 ## Priority order (by leverage)
 
-Leverage = agent payoff ÷ implementation effort. Do **P0 before P1**, etc.
+Leverage = agent payoff ÷ implementation effort. Do **P1 before P2**, etc.
 Within a band, list order is the suggested implementation sequence.
 
-| Band | Theme | Why high leverage |
-|------|--------|-------------------|
-| **P0** | Document lifecycle + true idempotency | Agents cannot curate KBs without list/delete/replace; highest gap vs AnythingLLM knowledge backend |
-| **P1** | Richer retrieval | Better filters/pagination/context budget → better answers without more product |
-| **P2** | Ingest quality & reporting | Fewer bad chunks; agents can act on per-file errors |
-| **P3** | MCP ↔ API parity + agent ergonomics | “Backend + API” story; adoption friction |
-| **P4** | Memories | Agent long-term notes; valuable but after curation/retrieval |
-| **P5** | Nice-to-haves | Lower payoff or out of core headless path |
+| Band | Theme | Why high leverage | Status |
+|------|--------|-------------------|--------|
+| **P0** | Document lifecycle + true idempotency | Agents cannot curate KBs without list/delete/replace | **Shipped** |
+| **P1** | Richer retrieval | Better filters/pagination/context budget → better answers without more product | Next |
+| **P2** | Ingest quality & reporting | Fewer bad chunks; agents can act on per-file errors | Open |
+| **P3** | MCP ↔ API parity + agent ergonomics | Remaining parity (path/url ingest API, docs, errors) | Partial (lifecycle done) |
+| **P4** | Memories | Agent long-term notes; valuable but after curation/retrieval | Open |
+| **P5** | Nice-to-haves | Lower payoff or out of core headless path | Open |
 
 ---
 
-## P0 — Document lifecycle + idempotency (do next)
+## P0 — Document lifecycle + idempotency (shipped)
 
-*Highest leverage remaining. Collections are write-mostly dumps until this lands.*
-
-- [ ] **Core: source lifecycle**
+- [x] **Core: source lifecycle**
   - `list_sources(collection)` — distinct `source` (+ counts, `source_type`, sample `last_modified`)
   - `delete_by_source(collection, source)`
   - `delete_by_filter` (tags / `source_type` / `project` at minimum)
   - Scroll/count helpers as needed (Qdrant scroll + payload filters)
-- [ ] **True re-ingest policy** (use existing `ingest_hash` index)
-  - Same source + same hash → **skip**
-  - Same source + different hash → **delete old points for source, then upsert**
+- [x] **True re-ingest policy** (use existing `ingest_hash` index)
+  - Same source + same content hash → **skip**
+  - Same source + different content → **delete old points for source, then upsert**
   - Report `{ inserted, skipped, replaced, chunks }` on ingest paths
-- [ ] **MCP tools** for list/delete-by-source/filter; extend ingest responses
-- [ ] **HTTP API** mirrors of the same (do not leave lifecycle MCP-only)
-- [ ] **Live smoke:** create → ingest → list_sources → re-ingest (skip/replace) → delete_by_source → search confirms
+- [x] **MCP tools** for list/delete-by-source/filter; extend ingest responses
+- [x] **HTTP API** mirrors of the same (do not leave lifecycle MCP-only)
+- [x] **Live smoke:** create → ingest → list_sources → re-ingest (skip/replace) → delete_by_source → search confirms
 
-**Done when:** an agent can fully manage a throwaway KB without `delete_collection`.
+**Done when:** an agent can fully manage a throwaway KB without `delete_collection`. ✅
 
 ---
 
-## P1 — Richer retrieval
+## P1 — Richer retrieval (do next)
 
 *High payoff once content can be curated; builds on existing search/context tools.*
 
