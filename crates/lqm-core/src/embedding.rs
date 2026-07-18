@@ -21,6 +21,10 @@ pub trait Embedder: Send + Sync + std::fmt::Debug {
     async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedError>;
     fn dimension(&self) -> usize;
     fn id(&self) -> &str;
+    /// Backend model identifier when known (fastembed/ollama/openai model name).
+    fn model(&self) -> Option<&str> {
+        None
+    }
 }
 
 pub struct FakeEmbedder {
@@ -59,6 +63,7 @@ impl Embedder for FakeEmbedder {
 #[cfg(feature = "embed-fastembed")]
 pub struct FastEmbedder {
     model: std::sync::Mutex<fastembed::TextEmbedding>,
+    model_name: String,
     dim: usize,
 }
 
@@ -66,6 +71,7 @@ pub struct FastEmbedder {
 impl std::fmt::Debug for FastEmbedder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FastEmbedder")
+            .field("model_name", &self.model_name)
             .field("dim", &self.dim)
             .finish()
     }
@@ -88,6 +94,7 @@ impl FastEmbedder {
         let dim = 384;
         Ok(Self {
             model: std::sync::Mutex::new(text_embedding),
+            model_name: model_name.to_string(),
             dim,
         })
     }
@@ -113,6 +120,10 @@ impl Embedder for FastEmbedder {
 
     fn id(&self) -> &str {
         "fastembed"
+    }
+
+    fn model(&self) -> Option<&str> {
+        Some(&self.model_name)
     }
 }
 
@@ -179,6 +190,10 @@ impl Embedder for OllamaEmbedder {
 
     fn id(&self) -> &str {
         "ollama"
+    }
+
+    fn model(&self) -> Option<&str> {
+        Some(&self.model)
     }
 }
 
@@ -247,6 +262,10 @@ impl Embedder for OpenAIEmbedder {
 
     fn id(&self) -> &str {
         "openai"
+    }
+
+    fn model(&self) -> Option<&str> {
+        Some(&self.model)
     }
 }
 

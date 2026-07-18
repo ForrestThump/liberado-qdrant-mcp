@@ -121,9 +121,11 @@ impl LqmServer {
             source_type.as_deref(),
             path_hint.or(source.as_deref()),
         );
+        let total = pieces.len();
         pieces
             .into_iter()
-            .map(|text| DocumentChunk {
+            .enumerate()
+            .map(|(i, text)| DocumentChunk {
                 text,
                 source: source.clone(),
                 source_type: source_type.clone(),
@@ -132,6 +134,8 @@ impl LqmServer {
                 timestamp: None,
                 project: project.clone(),
                 last_modified: last_modified.clone(),
+                chunk_index: Some(i),
+                total_chunks: Some(total),
             })
             .collect()
     }
@@ -751,6 +755,18 @@ impl LqmServer {
             "skipped": report.skipped,
             "replaced": report.replaced,
             "chunks": report.chunks,
+        }))
+    }
+
+    /// Active embedder identity (id, dimension, model) for diagnosing dim mismatches.
+    #[tool]
+    async fn get_embedder_info(&self) -> McpResult<Value> {
+        let info = self.core().embedder_info();
+        Ok(serde_json::json!({
+            "status": "ok",
+            "id": info.id,
+            "dimension": info.dimension,
+            "model": info.model,
         }))
     }
 
@@ -1395,6 +1411,8 @@ async fn test_ingest_and_search() {
         timestamp: None,
         project: Some("test_project".to_string()),
         last_modified: None,
+        chunk_index: Some(0),
+        total_chunks: Some(1),
     };
     core.embed_and_upsert_batch(vec![chunk])
         .await
@@ -1433,6 +1451,8 @@ async fn test_search_edge_cases() {
         timestamp: None,
         project: None,
         last_modified: None,
+        chunk_index: Some(0),
+        total_chunks: Some(1),
     };
     core.embed_and_upsert_batch(vec![chunk])
         .await
@@ -1482,6 +1502,8 @@ async fn test_multiple_collections_independence() {
         timestamp: None,
         project: None,
         last_modified: None,
+        chunk_index: Some(0),
+        total_chunks: Some(1),
     };
     core.embed_and_upsert_batch(vec![chunk_a])
         .await
@@ -1495,6 +1517,8 @@ async fn test_multiple_collections_independence() {
         timestamp: None,
         project: None,
         last_modified: None,
+        chunk_index: Some(0),
+        total_chunks: Some(1),
     };
     core.embed_and_upsert_batch(vec![chunk_b])
         .await

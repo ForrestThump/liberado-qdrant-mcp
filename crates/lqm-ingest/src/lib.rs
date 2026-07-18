@@ -154,6 +154,8 @@ pub fn extract_file(
             .get("last_modified")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+        chunk_index: None,
+        total_chunks: None,
     };
 
     Ok(vec![chunk])

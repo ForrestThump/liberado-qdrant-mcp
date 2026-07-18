@@ -12,6 +12,59 @@ pub struct DocumentChunk {
     pub timestamp: Option<String>,
     pub project: Option<String>,
     pub last_modified: Option<String>,
+    /// 0-based index within the parent document's chunk set (when known).
+    pub chunk_index: Option<usize>,
+    /// Total chunks produced for the parent document (when known).
+    pub total_chunks: Option<usize>,
+}
+
+impl DocumentChunk {
+    /// Convenience constructor for a single unsplit blob (no chunk indices).
+    pub fn simple(
+        text: impl Into<String>,
+        source: Option<String>,
+        source_type: Option<String>,
+        collection: Option<String>,
+    ) -> Self {
+        Self {
+            text: text.into(),
+            source,
+            source_type,
+            collection,
+            tags: None,
+            timestamp: None,
+            project: None,
+            last_modified: None,
+            chunk_index: None,
+            total_chunks: None,
+        }
+    }
+}
+
+/// Documented Qdrant payload keys written by the shared ingest path.
+///
+/// Agents and HTTP clients should treat these names as stable.
+pub mod payload_schema {
+    pub const TEXT: &str = "text";
+    pub const INGEST_HASH: &str = "ingest_hash";
+    pub const SOURCE: &str = "source";
+    pub const SOURCE_TYPE: &str = "source_type";
+    pub const TAGS: &str = "tags";
+    pub const TIMESTAMP: &str = "timestamp";
+    pub const PROJECT: &str = "project";
+    pub const LAST_MODIFIED: &str = "last_modified";
+    pub const CHUNK_INDEX: &str = "chunk_index";
+    pub const TOTAL_CHUNKS: &str = "total_chunks";
+    pub const EMBEDDING_MODEL: &str = "embedding_model";
+}
+
+/// Snapshot of the active embedder for agents and HTTP clients.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmbedderInfo {
+    pub id: String,
+    pub dimension: usize,
+    /// Backend-specific model name when known (e.g. `AllMiniLML6V2`, Ollama model).
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3,9 +3,9 @@ use crate::embedding::Embedder;
 use crate::error::LqmError;
 use crate::lifecycle::decide_source_reingest;
 use crate::types::{
-    ChunkConfig, CollectionInfoSummary, DocumentChunk, INDEX_FIELDS, IngestReport, PayloadFilter,
-    ReingestAction, SearchFilter, SearchOptions, SearchPage, SearchResult, SourceSummary,
-    UpsertPoint,
+    ChunkConfig, CollectionInfoSummary, DocumentChunk, EmbedderInfo, INDEX_FIELDS, IngestReport,
+    PayloadFilter, ReingestAction, SearchFilter, SearchOptions, SearchPage, SearchResult,
+    SourceSummary, UpsertPoint, payload_schema,
 };
 use qdrant_client::Qdrant as QdrantGrpc;
 use qdrant_client::qdrant::{
@@ -717,47 +717,18 @@ impl RagCore {
             let texts: Vec<String> = group_chunks.iter().map(|c| c.text.clone()).collect();
             let embeddings = self.embed_batch(texts).await?;
             let mut points = Vec::with_capacity(group_chunks.len());
+            let group_len = group_chunks.len();
+            let embedding_model = self
+                .embedder
+                .model()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| self.embedder.id().to_string());
 
-            for (chunk, vector) in group_chunks.into_iter().zip(embeddings) {
-                let ingest_hash = compute_ingest_hash(&chunk.text);
-                let mut payload = serde_json::Map::new();
-                payload.insert("text".to_string(), serde_json::Value::String(chunk.text));
-                payload.insert(
-                    "ingest_hash".to_string(),
-                    serde_json::Value::String(ingest_hash),
-                );
-                if let Some(source) = chunk.source {
-                    payload.insert("source".to_string(), serde_json::Value::String(source));
-                }
-                if let Some(source_type) = chunk.source_type {
-                    payload.insert(
-                        "source_type".to_string(),
-                        serde_json::Value::String(source_type),
-                    );
-                }
-                if let Some(tags) = chunk.tags {
-                    payload.insert(
-                        "tags".to_string(),
-                        serde_json::Value::Array(
-                            tags.into_iter().map(serde_json::Value::String).collect(),
-                        ),
-                    );
-                }
-                if let Some(timestamp) = chunk.timestamp {
-                    payload.insert(
-                        "timestamp".to_string(),
-                        serde_json::Value::String(timestamp),
-                    );
-                }
-                if let Some(project) = chunk.project {
-                    payload.insert("project".to_string(), serde_json::Value::String(project));
-                }
-                if let Some(last_modified) = chunk.last_modified {
-                    payload.insert(
-                        "last_modified".to_string(),
-                        serde_json::Value::String(last_modified),
-                    );
-                }
+            for (pos, (chunk, vector)) in group_chunks.into_iter().zip(embeddings).enumerate() {
+                let chunk_index = chunk.chunk_index.unwrap_or(pos);
+                let total_chunks = chunk.total_chunks.unwrap_or(group_len);
+                let payload =
+                    build_point_payload(&chunk, chunk_index, total_chunks, &embedding_model);
 
                 points.push(UpsertPoint {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -1011,6 +982,88 @@ impl RagCore {
             ChunkingStrategy::new(self.chunk_config.chunk_size, self.chunk_config.overlap);
         crate::chunking::chunk_for_ingest(text, source_type, path_hint, &strategy)
     }
+
+    /// Active embedder identity for agent/HTTP introspection.
+    pub fn embedder_info(&self) -> EmbedderInfo {
+        EmbedderInfo {
+            id: self.embedder.id().to_string(),
+            dimension: self.embedder.dimension(),
+            model: self.embedder.model().map(|s| s.to_string()),
+        }
+    }
+}
+
+/// Build the Qdrant payload map for a single chunk (shared schema; unit-tested offline).
+pub fn build_point_payload(
+    chunk: &DocumentChunk,
+    chunk_index: usize,
+    total_chunks: usize,
+    embedding_model: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let ingest_hash = compute_ingest_hash(&chunk.text);
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        payload_schema::TEXT.to_string(),
+        serde_json::Value::String(chunk.text.clone()),
+    );
+    payload.insert(
+        payload_schema::INGEST_HASH.to_string(),
+        serde_json::Value::String(ingest_hash),
+    );
+    if let Some(ref source) = chunk.source {
+        payload.insert(
+            payload_schema::SOURCE.to_string(),
+            serde_json::Value::String(source.clone()),
+        );
+    }
+    if let Some(ref source_type) = chunk.source_type {
+        payload.insert(
+            payload_schema::SOURCE_TYPE.to_string(),
+            serde_json::Value::String(source_type.clone()),
+        );
+    }
+    if let Some(ref tags) = chunk.tags {
+        payload.insert(
+            payload_schema::TAGS.to_string(),
+            serde_json::Value::Array(
+                tags.iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(ref timestamp) = chunk.timestamp {
+        payload.insert(
+            payload_schema::TIMESTAMP.to_string(),
+            serde_json::Value::String(timestamp.clone()),
+        );
+    }
+    if let Some(ref project) = chunk.project {
+        payload.insert(
+            payload_schema::PROJECT.to_string(),
+            serde_json::Value::String(project.clone()),
+        );
+    }
+    if let Some(ref last_modified) = chunk.last_modified {
+        payload.insert(
+            payload_schema::LAST_MODIFIED.to_string(),
+            serde_json::Value::String(last_modified.clone()),
+        );
+    }
+    payload.insert(
+        payload_schema::CHUNK_INDEX.to_string(),
+        serde_json::Value::Number(chunk_index.into()),
+    );
+    payload.insert(
+        payload_schema::TOTAL_CHUNKS.to_string(),
+        serde_json::Value::Number(total_chunks.into()),
+    );
+    payload.insert(
+        payload_schema::EMBEDDING_MODEL.to_string(),
+        serde_json::Value::String(embedding_model.to_string()),
+    );
+    payload
 }
 
 pub fn compute_ingest_hash(text: &str) -> String {
@@ -1054,6 +1107,37 @@ mod tests {
         assert_eq!(hash, hash2);
         let hash3 = compute_ingest_hash("different");
         assert_ne!(hash, hash3);
+    }
+
+    #[test]
+    fn test_build_point_payload_schema_keys() {
+        let chunk = DocumentChunk {
+            text: "hello".into(),
+            source: Some("s".into()),
+            source_type: Some("text".into()),
+            collection: Some("c".into()),
+            tags: Some(vec!["t".into()]),
+            timestamp: None,
+            project: Some("p".into()),
+            last_modified: None,
+            chunk_index: Some(1),
+            total_chunks: Some(3),
+        };
+        let payload = build_point_payload(&chunk, 1, 3, "AllMiniLML6V2");
+        assert_eq!(payload[payload_schema::TEXT], "hello");
+        assert!(payload[payload_schema::INGEST_HASH].as_str().unwrap().len() == 64);
+        assert_eq!(payload[payload_schema::SOURCE], "s");
+        assert_eq!(payload[payload_schema::CHUNK_INDEX], 1);
+        assert_eq!(payload[payload_schema::TOTAL_CHUNKS], 3);
+        assert_eq!(payload[payload_schema::EMBEDDING_MODEL], "AllMiniLML6V2");
+    }
+
+    #[test]
+    fn test_embedder_info_from_fake() {
+        let core = make_fake_core(1);
+        let info = core.embedder_info();
+        assert_eq!(info.id, "fake");
+        assert_eq!(info.dimension, 128);
     }
 
     #[test]

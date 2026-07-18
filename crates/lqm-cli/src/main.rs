@@ -142,6 +142,8 @@ async fn ingest_single_file(
         timestamp: None,
         project: None,
         last_modified: modified,
+        chunk_index: Some(0),
+        total_chunks: Some(1),
     };
 
     match core.embed_and_upsert_batch(vec![chunk]).await {

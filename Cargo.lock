@@ -2276,10 +2276,13 @@ dependencies = [
  "env_logger",
  "log",
  "lqm-core",
+ "lqm-ingest",
  "serde",
  "serde_json",
  "tokio",
+ "tower 0.5.3",
  "tower-http",
+ "walkdir",
 ]
 
 [[package]]

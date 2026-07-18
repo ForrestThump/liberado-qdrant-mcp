@@ -76,8 +76,8 @@ Within a band, list order is the suggested implementation sequence.
 | **P0** | Document lifecycle + true idempotency | Agents cannot curate KBs without list/delete/replace | **Shipped** |
 | **P1** | Richer retrieval | Better filters/pagination/context budget → better answers without more product | **Shipped** |
 | **P2** | Ingest quality & reporting | Fewer bad chunks; agents can act on per-file errors | **Shipped** |
-| **P3** | MCP ↔ API parity + agent ergonomics | Remaining parity (path/url ingest API, docs, errors) | Next |
-| **P4** | Memories | Agent long-term notes; valuable but after curation/retrieval | Open |
+| **P3** | MCP ↔ API parity + agent ergonomics | Remaining parity (path/url ingest API, docs, errors) | **Shipped** |
+| **P4** | Memories | Agent long-term notes; valuable but after curation/retrieval | Next |
 | **P5** | Nice-to-haves | Lower payoff or out of core headless path | Open |
 
 ---
@@ -141,24 +141,29 @@ Within a band, list order is the suggested implementation sequence.
 
 ---
 
-## P3 — Surface parity + agent ergonomics (do next)
+## P3 — Surface parity + agent ergonomics (shipped)
 
 *Unlocks “backend + API” replacement and reduces tool-calling mistakes.*
 
-- [ ] **HTTP API parity with MCP** — create/info collection, ingest path/url, get_relevant_context, source lifecycle
-- [ ] **Stable payload schema** — document + optionally add `chunk_index`, `total_chunks`, `embedding_model`
-- [ ] **`get_embedder_info`** tool/endpoint (id, dim, model) — avoid dim mismatches
-- [ ] **Structured errors** — machine-readable `code` + message (not only free-text internal errors)
-- [ ] **Agent docs** — tool matrix, when to use `search` vs `get_relevant_context`, Claude Desktop / Cursor / stdio vs `serve` examples
-- [ ] Optional **HTTP bearer** for non-private binds
-- [ ] **CI:** optional Qdrant service job so live smoke is not local-only
-- [ ] Mock HTTP tests for Ollama/OpenAI embedders (lower urgency than live Qdrant smoke)
+- [x] **HTTP API parity with MCP** — path/url/many ingest routes; create/info/sources/search/context already present
+- [x] **Stable payload schema** — `chunk_index`, `total_chunks`, `embedding_model` on upsert; constants in `payload_schema`
+- [x] **`get_embedder_info`** — MCP tool + `GET /api/embedder` (id, dimension, model)
+- [x] **Structured errors** — HTTP `{ code, message, error }`; shared `api_error` helpers
+- [x] **Agent docs** — `docs/AGENTS.md` tool matrix, search vs context, stdio/`serve`
+- [x] **HTTP bearer** — optional `LQM_API_TOKEN` → `Authorization: Bearer …` on `/api/*`
+- [x] **CI:** optional `live-qdrant` job with Qdrant service + `LQM_LIVE=1` smokes
+- [ ] Mock HTTP tests for Ollama/OpenAI embedders (deferred — lower urgency)
 
-**Done when:** every MCP capability has an HTTP equivalent and docs teach the tool set.
+**Done when:** every MCP capability has an HTTP equivalent and docs teach the tool set. ✅
+
+### Phase P3 notes
+
+- See `docs/AGENTS.md` for the tool/API matrix and host config sketches
+- Payload keys: `docs/AGENTS.md` § Stable payload schema
 
 ---
 
-## P4 — Memories (Phase 3)
+## P4 — Memories (do next)
 
 *Valuable for long-running agents; weaker leverage until P0–P1 exist.*
 
