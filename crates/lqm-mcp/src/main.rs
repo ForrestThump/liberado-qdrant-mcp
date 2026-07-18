@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use lqm_core::RagCore;
 use lqm_core::config::{EmbedderConfig, create_embedder};
+use lqm_core::format_relevant_context;
 use lqm_core::types::{DEFAULT_COLLECTION_NAME, DocumentChunk, RagConfig};
 use serde_json::Value;
 use std::sync::Arc;
@@ -187,6 +188,49 @@ impl LqmServer {
             }
             Err(e) => Err(McpError::internal(format!("search failed: {e}"))),
         }
+    }
+
+    /// Semantic search formatted as LLM-ready markdown context with citations.
+    ///
+    /// Reuses the same search path as `search`, then formats numbered passages with
+    /// score/source metadata plus a structured `sources` array for tooling.
+    #[tool]
+    #[allow(clippy::too_many_arguments)]
+    async fn get_relevant_context(
+        &self,
+        query: String,
+        collection: Option<String>,
+        limit: Option<u64>,
+        tags: Option<Vec<String>>,
+        source_type: Option<String>,
+        min_score: Option<f32>,
+        max_chars_per_passage: Option<u64>,
+    ) -> McpResult<Value> {
+        let core = self.core();
+        let coll = collection.clone();
+        let results = core
+            .search(
+                &query,
+                coll.as_deref(),
+                Some(limit.unwrap_or(8)),
+                tags,
+                source_type.as_deref(),
+                min_score,
+            )
+            .await
+            .map_err(|e| McpError::internal(format!("get_relevant_context search failed: {e}")))?;
+
+        let max_chars = max_chars_per_passage.map(|n| n as usize);
+        let formatted = format_relevant_context(&query, &results, max_chars);
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "query": query,
+            "collection": collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string()),
+            "passage_count": formatted.passage_count,
+            "context": formatted.context,
+            "sources": formatted.sources,
+        }))
     }
 
     #[tool]
