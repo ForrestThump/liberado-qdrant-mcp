@@ -21,6 +21,18 @@ pub struct SearchResult {
     pub payload: Payload,
 }
 
+/// Serializable snapshot of a Qdrant collection for agents and tools.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectionInfoSummary {
+    pub name: String,
+    pub points_count: Option<u64>,
+    pub indexed_vectors_count: Option<u64>,
+    pub segments_count: u64,
+    pub status: String,
+    pub vector_size: Option<u64>,
+    pub distance: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CollectionConfig {
     pub name: String,

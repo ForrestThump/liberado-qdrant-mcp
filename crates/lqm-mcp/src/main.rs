@@ -198,6 +198,66 @@ impl LqmServer {
         }
     }
 
+    /// Create a Qdrant collection for agent-scoped knowledge.
+    ///
+    /// When `vector_dim` is omitted, the active embedder's dimension is used so later upserts
+    /// match. Idempotent: existing collections are left alone and reported as `created: false`.
+    #[tool]
+    async fn create_collection(&self, name: String, vector_dim: Option<u64>) -> McpResult<Value> {
+        let dim = vector_dim.map(|d| d as usize);
+        match self.core().create_collection(&name, dim).await {
+            Ok(created) => {
+                let resolved_dim = dim.unwrap_or_else(|| self.core().embedder.dimension());
+                Ok(serde_json::json!({
+                    "status": "ok",
+                    "name": name,
+                    "created": created,
+                    "vector_dim": resolved_dim,
+                }))
+            }
+            Err(e) => Err(McpError::internal(format!("create_collection failed: {e}"))),
+        }
+    }
+
+    /// Delete a collection and all of its points. Returns `deleted: false` if it did not exist.
+    #[tool]
+    async fn delete_collection(&self, name: String) -> McpResult<Value> {
+        match self.core().delete_collection(&name).await {
+            Ok(deleted) => Ok(serde_json::json!({
+                "status": "ok",
+                "name": name,
+                "deleted": deleted,
+            })),
+            Err(e) => Err(McpError::internal(format!("delete_collection failed: {e}"))),
+        }
+    }
+
+    /// Inspect a collection: point counts, vector size, distance metric, status.
+    #[tool]
+    async fn get_collection_info(&self, name: String) -> McpResult<Value> {
+        match self.core().get_collection_info(&name).await {
+            Ok(Some(info)) => Ok(serde_json::json!({
+                "status": "ok",
+                "exists": true,
+                "name": info.name,
+                "points_count": info.points_count,
+                "indexed_vectors_count": info.indexed_vectors_count,
+                "segments_count": info.segments_count,
+                "collection_status": info.status,
+                "vector_size": info.vector_size,
+                "distance": info.distance,
+            })),
+            Ok(None) => Ok(serde_json::json!({
+                "status": "ok",
+                "exists": false,
+                "name": name,
+            })),
+            Err(e) => Err(McpError::internal(format!(
+                "get_collection_info failed: {e}"
+            ))),
+        }
+    }
+
     #[tool]
     async fn ingest_path(&self, path: String, collection: Option<String>) -> McpResult<Value> {
         let core = self.core();
@@ -303,6 +363,48 @@ async fn test_list_collections() {
     }
     let result = server.unwrap().core().list_collections().await;
     assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_collection_create_info_delete_tools() {
+    let server = create_test_server().await;
+    if server.is_none() {
+        return;
+    }
+    let server = server.unwrap();
+    let coll = "lqm_mcp_test_coll_mgmt";
+    let _ = server.core().delete_collection(coll).await;
+
+    let created = server
+        .create_collection(coll.to_string(), None)
+        .await
+        .expect("create_collection");
+    assert_eq!(created["status"], "ok");
+    assert_eq!(created["created"], true);
+    assert_eq!(
+        created["vector_dim"],
+        server.core().embedder.dimension() as u64
+    );
+
+    let info = server
+        .get_collection_info(coll.to_string())
+        .await
+        .expect("get_collection_info");
+    assert_eq!(info["exists"], true);
+    assert_eq!(info["name"], coll);
+    assert!(info["vector_size"].as_u64().is_some());
+
+    let deleted = server
+        .delete_collection(coll.to_string())
+        .await
+        .expect("delete_collection");
+    assert_eq!(deleted["deleted"], true);
+
+    let gone = server
+        .get_collection_info(coll.to_string())
+        .await
+        .expect("get after delete");
+    assert_eq!(gone["exists"], false);
 }
 
 #[tokio::test]

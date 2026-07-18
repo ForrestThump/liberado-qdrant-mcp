@@ -333,7 +333,16 @@ api_key = "sk-test"
         let result = create_embedder(&config);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("nonexistent"));
-        assert!(err.contains("fake"));
+        assert!(err.contains("nonexistent"), "err was: {err}");
+        // Available backends depend on unified features (e.g. workspace crates enabling
+        // embed-fastembed); always mention at least one known backend name.
+        assert!(
+            err.contains("Available backends")
+                && (err.contains("fake")
+                    || err.contains("fastembed")
+                    || err.contains("ollama")
+                    || err.contains("openai")),
+            "err was: {err}"
+        );
     }
 }

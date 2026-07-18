@@ -1,12 +1,14 @@
 use crate::chunking::{ChunkingStrategy, chunk_text};
 use crate::embedding::Embedder;
 use crate::error::LqmError;
-use crate::types::{ChunkConfig, DocumentChunk, INDEX_FIELDS, SearchResult, UpsertPoint};
+use crate::types::{
+    ChunkConfig, CollectionInfoSummary, DocumentChunk, INDEX_FIELDS, SearchResult, UpsertPoint,
+};
 use qdrant_client::Qdrant as QdrantGrpc;
 use qdrant_client::qdrant::{
-    CreateCollection, CreateFieldIndexCollectionBuilder, DeleteCollection, DenseVector, Distance,
-    FieldType, Filter, PointId, PointStruct, ScoredPoint, SearchPoints, UpsertPoints, Vector,
-    VectorParams, Vectors, WithPayloadSelector, vector,
+    CollectionStatus, CreateCollection, CreateFieldIndexCollectionBuilder, DeleteCollection,
+    DenseVector, Distance, FieldType, Filter, PointId, PointStruct, ScoredPoint, SearchPoints,
+    UpsertPoints, Vector, VectorParams, Vectors, WithPayloadSelector, vector, vectors_config,
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -84,6 +86,59 @@ impl QdrantClient {
             })
             .await?;
         Ok(true)
+    }
+
+    /// Fetch collection stats and vector config for agent-facing inspection.
+    pub async fn get_collection_info(
+        &self,
+        name: &str,
+    ) -> Result<Option<CollectionInfoSummary>, QdrantError> {
+        if !self.collection_exists(name).await? {
+            return Ok(None);
+        }
+        let resp = self.inner.collection_info(name).await?;
+        let info = resp
+            .result
+            .ok_or_else(|| QdrantError::Qdrant("collection info missing result".to_string()))?;
+
+        let status = CollectionStatus::try_from(info.status)
+            .map(|s| format!("{s:?}"))
+            .unwrap_or_else(|_| format!("unknown({})", info.status));
+
+        let (vector_size, distance) = info
+            .config
+            .as_ref()
+            .and_then(|c| c.params.as_ref())
+            .and_then(|p| p.vectors_config.as_ref())
+            .and_then(|vc| vc.config.as_ref())
+            .and_then(|cfg| match cfg {
+                vectors_config::Config::Params(params) => {
+                    let dist = Distance::try_from(params.distance)
+                        .map(|d| format!("{d:?}"))
+                        .unwrap_or_else(|_| format!("unknown({})", params.distance));
+                    Some((Some(params.size), Some(dist)))
+                }
+                vectors_config::Config::ParamsMap(map) => {
+                    // Single unnamed dense vector is the common case; take the first entry.
+                    map.map.values().next().map(|params| {
+                        let dist = Distance::try_from(params.distance)
+                            .map(|d| format!("{d:?}"))
+                            .unwrap_or_else(|_| format!("unknown({})", params.distance));
+                        (Some(params.size), Some(dist))
+                    })
+                }
+            })
+            .unwrap_or((None, None));
+
+        Ok(Some(CollectionInfoSummary {
+            name: name.to_string(),
+            points_count: info.points_count,
+            indexed_vectors_count: info.indexed_vectors_count,
+            segments_count: info.segments_count,
+            status,
+            vector_size,
+            distance,
+        }))
     }
 
     #[allow(deprecated)]
@@ -334,6 +389,38 @@ impl RagCore {
     pub async fn delete_collection(&self, name: &str) -> Result<bool, LqmError> {
         log::info!("deleting collection '{}'", name);
         Ok(self.qdrant.delete_collection(name).await?)
+    }
+
+    /// Create (or ensure) a collection. When `vector_dim` is `None`, uses the active embedder's
+    /// dimension — the only size that will accept later upserts from this process.
+    ///
+    /// Returns `true` if the collection was newly created, `false` if it already existed.
+    pub async fn create_collection(
+        &self,
+        name: &str,
+        vector_dim: Option<usize>,
+    ) -> Result<bool, LqmError> {
+        if name.trim().is_empty() {
+            return Err(LqmError::Validation(
+                "collection name must not be empty".to_string(),
+            ));
+        }
+        let dim = vector_dim.unwrap_or_else(|| self.embedder.dimension());
+        if dim == 0 {
+            return Err(LqmError::Validation(
+                "vector dimension must be greater than zero".to_string(),
+            ));
+        }
+        let existed = self.qdrant.collection_exists(name).await?;
+        self.ensure_collection(name, dim).await?;
+        Ok(!existed)
+    }
+
+    pub async fn get_collection_info(
+        &self,
+        name: &str,
+    ) -> Result<Option<CollectionInfoSummary>, LqmError> {
+        Ok(self.qdrant.get_collection_info(name).await?)
     }
 
     pub async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, LqmError> {
@@ -650,6 +737,48 @@ mod tests {
         match result {
             Ok(deleted) => {
                 assert!(!deleted, "Nonexistent collection should return false");
+            }
+            Err(e) => {
+                eprintln!("Qdrant operation skipped (likely not running): {:?}", e);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_collection_validation() {
+        let core = make_fake_core(2);
+        let empty = core.create_collection("  ", None).await;
+        assert!(matches!(empty, Err(LqmError::Validation(_))));
+        let zero_dim = core.create_collection("ok_name", Some(0)).await;
+        assert!(matches!(zero_dim, Err(LqmError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn test_create_and_get_collection_info() {
+        let core = make_fake_core(2);
+        let coll = "lqm_core_test_info";
+        let _ = core.delete_collection(coll).await;
+
+        match core.create_collection(coll, None).await {
+            Ok(created) => {
+                assert!(created, "first create should report newly created");
+                let created_again = core.create_collection(coll, None).await.unwrap();
+                assert!(!created_again, "second create should report existing");
+
+                let info = core.get_collection_info(coll).await.unwrap();
+                let info = info.expect("collection info should exist");
+                assert_eq!(info.name, coll);
+                assert_eq!(info.vector_size, Some(128));
+                assert!(info.distance.is_some());
+                assert!(info.segments_count >= 1);
+
+                let missing = core
+                    .get_collection_info("lqm_core_missing_info_xyz")
+                    .await
+                    .unwrap();
+                assert!(missing.is_none());
+
+                let _ = core.delete_collection(coll).await;
             }
             Err(e) => {
                 eprintln!("Qdrant operation skipped (likely not running): {:?}", e);
