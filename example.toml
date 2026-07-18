@@ -1,0 +1,38 @@
+# liberado-qdrant-mcp — Example Configuration
+#
+# Copy this file to `lqm.toml` and customize for your setup.
+# Then run: lqm-mcp --config lqm.toml
+#        or: lqm-cli --config lqm.toml ingest ...
+#        or: lqm-api --config lqm.toml
+
+[embedding]
+# Backend: fake, fastembed, ollama, or openai
+backend = "ollama"
+
+# Vector dimension — must match the model output
+# Fake: any
+# fastembed AllMiniLML6V2: 384
+# Ollama nomic-embed-text: 768
+# OpenAI text-embedding-3-small: 1536
+# OpenAI text-embedding-3-large: 3072
+dimension = 768
+
+# ── ollama backend ──────────────────────────────────────
+[embedding.ollama]
+url = "http://localhost:11434"      # default if omitted
+model = "nomic-embed-text"
+
+# ── openai / openai-compatible backend ──────────────────
+# [embedding.openai]
+# url = "https://api.openai.com/v1"  # or LiteLLM, Together, etc.
+# model = "text-embedding-3-small"
+# api_key = "sk-..."
+
+# ── fastembed backend (needs embed-fastembed feature) ───
+# [embedding.fastembed]
+# model = "AllMiniLML6V2"           # or BGEBaseEnV15, etc.
+
+# ── fake backend (zero vectors, for testing only) ───────
+# [embedding]
+# backend = "fake"
+# dimension = 384

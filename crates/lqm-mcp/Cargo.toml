@@ -1,0 +1,35 @@
+[package]
+name = "lqm-mcp"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "lqm-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# Embedder backends are feature-gated in lqm-core and its default set is EMPTY, so without naming
+# one here `create_embedder` can only ever produce the `fake` (zero-vector) embedder — the server
+# would start, accept ingests, and silently store meaningless vectors.
+#
+# fastembed is the sovereign choice and the reason it is the default: it runs ONNX locally, needs no
+# API key and no external service. The homelab has no Ollama and no embedding API key, so the other
+# two backends have nothing to talk to. openai/ollama stay available as opt-in features for anyone
+# who does have an endpoint.
+lqm-core = { path = "../lqm-core", features = ["embed-fastembed"] }
+lqm-ingest = { path = "../lqm-ingest" }
+walkdir = "2"
+# Fleet standard: the ForrestThump fork pinned by rev — same pin as every other liberado-*-mcp.
+# crates.io "3" floats and predates two HTTP fixes the fork carries (notably the POST-response SSE
+# stream hang). Pinned by rev, not branch: the container builds straight from GitHub and a branch
+# would let the MCP layer move under a rebuild with no commit here to show for it.
+# Safe alongside lqm-core's reqwest 0.12: that is semver-incompatible with turbomcp's 0.13, so the
+# two do not feature-unify (the trap that broke liberado-spider-mcp).
+turbomcp = { git = "https://github.com/ForrestThump/turbomcp.git", rev = "d47a8cabe1647a92046d8d7765ca0b4f2e8819d5", features = ["stdio", "http", "channel"] }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+# `env` so --qdrant-url can also come from QDRANT_URL. In the container the flag would have to sit
+# before the subcommand, which fights ENTRYPOINT/CMD; an env var keeps compose config uniform.
+clap = { version = "4", features = ["derive", "env"] }
+log = "0.4"
+env_logger = "0.11"

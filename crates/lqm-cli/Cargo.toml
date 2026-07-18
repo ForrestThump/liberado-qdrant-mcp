@@ -1,0 +1,21 @@
+[package]
+name = "lqm-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "lqm-cli"
+path = "src/main.rs"
+
+[features]
+embed-fastembed = ["lqm-core/embed-fastembed"]
+
+[dependencies]
+lqm-core = { path = "../lqm-core" }
+lqm-ingest = { path = "../lqm-ingest" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+walkdir = "2"
+log = "0.4"
+env_logger = "0.11"
