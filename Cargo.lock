@@ -2321,8 +2321,10 @@ version = "0.1.0"
 dependencies = [
  "lqm-core",
  "pdf-extract",
+ "reqwest 0.12.28",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "uuid",
 ]
 
