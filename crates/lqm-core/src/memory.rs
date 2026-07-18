@@ -20,6 +20,24 @@ pub mod memory_payload {
     pub const MEMORY_ID: &str = "memory_id";
 }
 
+/// Parse a 0–1 importance from a Qdrant-restored payload value.
+///
+/// Production upsert maps non-string JSON to Qdrant `StringValue` via `v.to_string()`,
+/// so numbers come back as JSON strings (`"0.85"`). Accept both number and string forms.
+pub fn parse_importance_value(v: &serde_json::Value) -> Option<f32> {
+    if let Some(f) = v.as_f64() {
+        return Some((f as f32).clamp(0.0, 1.0));
+    }
+    if let Some(s) = v.as_str() {
+        return s.trim().parse::<f32>().ok().map(|f| f.clamp(0.0, 1.0));
+    }
+    // Integers sometimes appear as i64 in synthetic JSON.
+    if let Some(i) = v.as_i64() {
+        return Some((i as f32).clamp(0.0, 1.0));
+    }
+    None
+}
+
 /// Input for storing one memory note.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryNote {
@@ -88,9 +106,11 @@ pub fn memory_extra_payload(
     memory_id: &str,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut m = serde_json::Map::new();
+    // Store as string so Qdrant StringValue round-trip preserves the value without
+    // relying on Number→String coercion of `v.to_string()` in upsert_points.
     m.insert(
         memory_payload::IMPORTANCE.to_string(),
-        serde_json::json!(importance.clamp(0.0, 1.0)),
+        serde_json::Value::String(format!("{}", importance.clamp(0.0, 1.0))),
     );
     m.insert(
         memory_payload::LAST_ACCESSED.to_string(),
@@ -179,14 +199,15 @@ pub fn rank_memory_hits(
             let importance = r
                 .payload
                 .get(memory_payload::IMPORTANCE)
-                .and_then(|v| v.as_f64())
-                .map(|f| f as f32)
+                .and_then(parse_importance_value)
                 .unwrap_or(0.5);
-            let last_accessed = r
-                .payload
-                .get(memory_payload::LAST_ACCESSED)
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            // last_accessed is always written as a string; also accept number-ish forms.
+            let last_accessed = r.payload.get(memory_payload::LAST_ACCESSED).and_then(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| v.as_u64().map(|n| n.to_string()))
+                    .or_else(|| v.as_i64().map(|n| n.to_string()))
+            });
             let last_ts = parse_unix_secs(last_accessed.as_deref());
             let blended = blend_memory_score(
                 r.score,
@@ -290,11 +311,31 @@ mod tests {
             1,
             "fake",
         );
+        // build_point_payload writes importance as string for Qdrant round-trip.
+        let built_imp = parse_importance_value(&base[memory_payload::IMPORTANCE]).unwrap();
+        assert!((built_imp - 0.8).abs() < 1e-5, "built={built_imp}");
+        assert!(base[memory_payload::IMPORTANCE].as_str().is_some());
+
         let merged = merge_memory_into_payload(base, 0.8, 100, "id");
-        assert!((merged[memory_payload::IMPORTANCE].as_f64().unwrap() - 0.8).abs() < 1e-5);
+        let imp = parse_importance_value(&merged[memory_payload::IMPORTANCE]).unwrap();
+        assert!((imp - 0.8).abs() < 1e-5, "merged={imp}");
         assert_eq!(merged[memory_payload::LAST_ACCESSED], "100");
         assert_eq!(merged[memory_payload::MEMORY_ID], "id");
         assert_eq!(merged[payload_schema::SOURCE_TYPE], MEMORY_SOURCE_TYPE);
+    }
+
+    #[test]
+    fn parse_importance_accepts_number_and_string() {
+        assert!((parse_importance_value(&json!(0.85)).unwrap() - 0.85).abs() < 1e-5);
+        assert!((parse_importance_value(&json!("0.85")).unwrap() - 0.85).abs() < 1e-5);
+        // Simulates Number→to_string() as performed by upsert_points for non-strings.
+        let coerced = json!(0.9).to_string();
+        assert_eq!(coerced, "0.9");
+        assert!(
+            (parse_importance_value(&serde_json::Value::String(coerced)).unwrap() - 0.9).abs()
+                < 1e-5
+        );
+        assert_eq!(parse_importance_value(&json!("nope")), None);
     }
 
     #[test]
@@ -341,5 +382,114 @@ mod tests {
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].text, "new");
         assert!(ranked[0].blended_score >= ranked[1].blended_score);
+    }
+
+    /// Production shape: Qdrant returns importance as a JSON *string* after StringValue round-trip.
+    #[test]
+    fn rank_memory_hits_reads_string_importance_qdrant_shape() {
+        let now = 10_000_000_u64;
+        let results = vec![
+            SearchResult {
+                text: "low".into(),
+                score: 0.9,
+                // string importance — what scored_point_to_search_result actually yields
+                payload: json!({
+                    "importance": "0.1",
+                    "last_accessed": now.to_string(),
+                    "memory_id": "low",
+                    "source": "memory://low",
+                }),
+            },
+            SearchResult {
+                text: "high".into(),
+                score: 0.9,
+                payload: json!({
+                    "importance": "0.95",
+                    "last_accessed": now.to_string(),
+                    "memory_id": "high",
+                    "source": "memory://high",
+                }),
+            },
+        ];
+        // use_recency=false still applies 0.75*sem + 0.25*imp, so higher string importance wins.
+        let ranked = rank_memory_hits(&results, now, false, 86_400.0);
+        assert_eq!(ranked.len(), 2);
+        assert!(
+            (ranked
+                .iter()
+                .find(|h| h.text == "high")
+                .unwrap()
+                .importance
+                .unwrap()
+                - 0.95)
+                .abs()
+                < 1e-5,
+            "string importance must parse, got {:?}",
+            ranked
+        );
+        assert!(
+            (ranked
+                .iter()
+                .find(|h| h.text == "low")
+                .unwrap()
+                .importance
+                .unwrap()
+                - 0.1)
+                .abs()
+                < 1e-5
+        );
+        // Re-rank with recency off still keeps higher blended from importance:
+        let high_blend = ranked
+            .iter()
+            .find(|h| h.text == "high")
+            .unwrap()
+            .blended_score;
+        let low_blend = ranked
+            .iter()
+            .find(|h| h.text == "low")
+            .unwrap()
+            .blended_score;
+        assert!(
+            high_blend > low_blend,
+            "high_blend={high_blend} low_blend={low_blend}"
+        );
+    }
+
+    /// End-to-end pure path: build_point_payload → simulate upsert string coercion → rank.
+    #[test]
+    fn importance_survives_qdrant_string_coercion_path() {
+        let chunk = memory_note_to_chunk(
+            &MemoryNote {
+                text: "pref".into(),
+                importance: Some(0.85),
+                tags: None,
+                project: None,
+                memory_id: Some("p1".into()),
+            },
+            DEFAULT_MEMORY_COLLECTION,
+            1_700_000_000,
+        );
+        let payload_map = crate::qdrant::build_point_payload(&chunk, 0, 1, "fake");
+        // Simulate what upsert does for any non-string (and our write is already string).
+        let mut restored = serde_json::Map::new();
+        for (k, v) in payload_map {
+            let as_search = match v {
+                serde_json::Value::String(s) => serde_json::Value::String(s),
+                serde_json::Value::Array(a) => serde_json::Value::Array(a),
+                other => serde_json::Value::String(other.to_string()),
+            };
+            restored.insert(k, as_search);
+        }
+        let imp = parse_importance_value(restored.get(memory_payload::IMPORTANCE).unwrap())
+            .expect("importance after coercion");
+        assert!((imp - 0.85).abs() < 1e-4, "imp={imp}");
+
+        let results = vec![SearchResult {
+            text: "pref".into(),
+            score: 0.9,
+            payload: serde_json::Value::Object(restored),
+        }];
+        let hits = rank_memory_hits(&results, 1_700_000_000, false, 86_400.0);
+        assert!((hits[0].importance.unwrap() - 0.85).abs() < 1e-4);
     }
 }

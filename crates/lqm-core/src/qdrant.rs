@@ -1140,9 +1140,11 @@ pub fn build_point_payload(
         serde_json::Value::String(embedding_model.to_string()),
     );
     if let Some(imp) = chunk.importance {
+        // String form survives Qdrant StringValue round-trip (upsert maps non-strings
+        // via v.to_string(); scored_point restores StringValue as JSON String).
         payload.insert(
             payload_schema::IMPORTANCE.to_string(),
-            serde_json::json!(imp.clamp(0.0, 1.0)),
+            serde_json::Value::String(format!("{}", imp.clamp(0.0, 1.0))),
         );
     }
     if let Some(ref mid) = chunk.memory_id {
@@ -1229,6 +1231,37 @@ mod tests {
         assert_eq!(payload[payload_schema::CHUNK_INDEX], 1);
         assert_eq!(payload[payload_schema::TOTAL_CHUNKS], 3);
         assert_eq!(payload[payload_schema::EMBEDDING_MODEL], "AllMiniLML6V2");
+    }
+
+    #[test]
+    fn test_build_point_payload_memory_importance_is_string() {
+        let chunk = DocumentChunk {
+            text: "note".into(),
+            source: Some("memory://m1".into()),
+            source_type: Some(crate::memory::MEMORY_SOURCE_TYPE.into()),
+            collection: Some(crate::memory::DEFAULT_MEMORY_COLLECTION.into()),
+            tags: None,
+            timestamp: Some("1700000000".into()),
+            project: None,
+            last_modified: Some("1700000000".into()),
+            chunk_index: Some(0),
+            total_chunks: Some(1),
+            importance: Some(0.85),
+            memory_id: Some("m1".into()),
+        };
+        let payload = build_point_payload(&chunk, 0, 1, "fake");
+        // Must be a JSON string so Qdrant StringValue path is a no-op identity.
+        assert_eq!(
+            payload[payload_schema::IMPORTANCE].as_str(),
+            Some("0.85"),
+            "importance should be string for round-trip: {:?}",
+            payload[payload_schema::IMPORTANCE]
+        );
+        assert_eq!(
+            payload[payload_schema::LAST_ACCESSED].as_str(),
+            Some("1700000000")
+        );
+        assert_eq!(payload[payload_schema::MEMORY_ID].as_str(), Some("m1"));
     }
 
     #[test]

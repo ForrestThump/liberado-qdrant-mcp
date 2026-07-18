@@ -22,7 +22,7 @@ pub use context::{
 pub use lifecycle::decide_source_reingest;
 pub use memory::{
     DEFAULT_MEMORY_COLLECTION, MEMORY_SOURCE_TYPE, MemoryHit, MemoryNote, blend_memory_score,
-    memory_note_to_chunk, rank_memory_hits,
+    memory_note_to_chunk, parse_importance_value, rank_memory_hits,
 };
 pub use qdrant::QdrantClient;
 pub use qdrant::RagCore;
