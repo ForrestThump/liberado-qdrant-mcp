@@ -999,6 +999,18 @@ impl RagCore {
             ChunkingStrategy::new(self.chunk_config.chunk_size, self.chunk_config.overlap);
         chunk_text(text, &strategy)
     }
+
+    /// Structure-aware chunking (markdown headings / code defs / plain paragraphs).
+    pub fn chunk_for_ingest(
+        &self,
+        text: &str,
+        source_type: Option<&str>,
+        path_hint: Option<&str>,
+    ) -> Vec<String> {
+        let strategy =
+            ChunkingStrategy::new(self.chunk_config.chunk_size, self.chunk_config.overlap);
+        crate::chunking::chunk_for_ingest(text, source_type, path_hint, &strategy)
+    }
 }
 
 pub fn compute_ingest_hash(text: &str) -> String {

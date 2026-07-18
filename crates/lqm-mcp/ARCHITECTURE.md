@@ -22,9 +22,10 @@ lqm-mcp serve        → HTTP server (persistent, single model in RAM)
 
 | Tool | Role |
 |------|------|
-| `ingest_text` | Embed/upsert a text blob (auto-creates collection); skip/replace by source |
-| `ingest_path` | Walk file/dir via `lqm-ingest` extractors |
-| `ingest_url` | HTTP(S) fetch + HTML/plain extract → chunk/embed/upsert |
+| `ingest_text` | Structure-aware chunk → embed/upsert; skip/replace by source; `file_results` |
+| `ingest_path` | Walk file/dir; per-file `file_results`; md/code chunking; PDF enabled |
+| `ingest_url` | Fetch + hardened HTML (title, size cap) → structure-aware chunk/upsert |
+| `ingest_many` | Batch texts/paths/urls with one upsert and per-item results |
 | `search` | Semantic search; filters (source/project/tags must·should·must_not), offset pagination |
 | `get_relevant_context` | Same filters + markdown passages, char budget, optional MMR |
 | `list_collections` | Collection names |

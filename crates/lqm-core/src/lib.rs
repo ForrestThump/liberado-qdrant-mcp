@@ -1,4 +1,9 @@
 pub mod chunking;
+
+pub use chunking::{
+    ChunkKind, ChunkingStrategy, chunk_code, chunk_for_ingest, chunk_kind_for, chunk_markdown,
+    chunk_text,
+};
 pub mod config;
 pub mod context;
 pub mod embedding;

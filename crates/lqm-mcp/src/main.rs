@@ -102,6 +102,39 @@ impl LqmServer {
                 ))
             })
     }
+
+    /// Expand a source document into structure-aware `DocumentChunk`s for upsert.
+    #[allow(clippy::too_many_arguments)]
+    fn expand_to_chunks(
+        &self,
+        text: &str,
+        source: Option<String>,
+        source_type: Option<String>,
+        collection: String,
+        tags: Option<Vec<String>>,
+        project: Option<String>,
+        last_modified: Option<String>,
+        path_hint: Option<&str>,
+    ) -> Vec<DocumentChunk> {
+        let pieces = self.core().chunk_for_ingest(
+            text,
+            source_type.as_deref(),
+            path_hint.or(source.as_deref()),
+        );
+        pieces
+            .into_iter()
+            .map(|text| DocumentChunk {
+                text,
+                source: source.clone(),
+                source_type: source_type.clone(),
+                collection: Some(collection.clone()),
+                tags: tags.clone(),
+                timestamp: None,
+                project: project.clone(),
+                last_modified: last_modified.clone(),
+            })
+            .collect()
+    }
 }
 
 #[server(name = "liberado-qdrant-mcp", version = "0.1.0")]
@@ -137,17 +170,35 @@ impl LqmServer {
         // demand at the embedder's dimension, which is also the only place that knows the right size.
         self.ensure_collection(&collection).await?;
 
-        let chunk = DocumentChunk {
-            text,
+        let path_hint = source.clone();
+        let chunks = self.expand_to_chunks(
+            &text,
             source,
             source_type,
-            collection: Some(collection.clone()),
+            collection.clone(),
             tags,
-            timestamp: None,
             project,
             last_modified,
-        };
-        match core.embed_and_upsert_batch(vec![chunk]).await {
+            path_hint.as_deref(),
+        );
+        if chunks.is_empty() {
+            return Ok(serde_json::json!({
+                "status": "ok",
+                "collection": collection,
+                "inserted": 0,
+                "skipped": 0,
+                "replaced": 0,
+                "chunks": 0,
+                "files": [{
+                    "path": path_hint,
+                    "ok": true,
+                    "error": null,
+                    "chunks": 0,
+                }],
+            }));
+        }
+        let file_chunks = chunks.len();
+        match core.embed_and_upsert_batch(chunks).await {
             Ok(report) => Ok(serde_json::json!({
                 "status": "ok",
                 "collection": collection,
@@ -155,6 +206,12 @@ impl LqmServer {
                 "skipped": report.skipped,
                 "replaced": report.replaced,
                 "chunks": report.chunks,
+                "files": [{
+                    "path": path_hint,
+                    "ok": true,
+                    "error": null,
+                    "chunks": file_chunks,
+                }],
             })),
             Err(e) => Err(McpError::internal(format!("ingest failed: {e}"))),
         }
@@ -388,27 +445,23 @@ impl LqmServer {
         let resolved_source = source.unwrap_or_else(|| fetched.url.clone());
         let resolved_source_type = source_type.unwrap_or(fetched.source_type);
 
-        // Chunk long pages so retrieval stays passage-level, same path as local file ingest.
-        let pieces = self.core().chunk_text_method(&fetched.text);
-        let chunks: Vec<DocumentChunk> = pieces
-            .into_iter()
-            .map(|text| DocumentChunk {
-                text,
-                source: Some(resolved_source.clone()),
-                source_type: Some(resolved_source_type.clone()),
-                collection: Some(collection.clone()),
-                tags: tags.clone(),
-                timestamp: None,
-                project: project.clone(),
-                last_modified: None,
-            })
-            .collect();
+        let chunks = self.expand_to_chunks(
+            &fetched.text,
+            Some(resolved_source.clone()),
+            Some(resolved_source_type.clone()),
+            collection.clone(),
+            tags,
+            project,
+            None,
+            Some(&resolved_source),
+        );
 
         if chunks.is_empty() {
             return Err(McpError::internal(format!(
                 "ingest_url produced no chunks for {url}"
             )));
         }
+        let file_chunks = chunks.len();
 
         let report = self
             .core()
@@ -430,74 +483,95 @@ impl LqmServer {
             "url": url,
             "source": resolved_source,
             "source_type": resolved_source_type,
+            "title": fetched.title,
             "content_type": fetched.content_type,
             "collection": collection,
             "inserted": report.inserted,
             "skipped": report.skipped,
             "replaced": report.replaced,
             "chunks": report.chunks,
+            "files": [{
+                "path": url,
+                "ok": true,
+                "error": null,
+                "chunks": file_chunks,
+            }],
         }))
     }
 
+    /// Ingest a file or directory with per-file `{ path, ok, error, chunks }` reporting.
     #[tool]
     async fn ingest_path(&self, path: String, collection: Option<String>) -> McpResult<Value> {
         let core = self.core();
         let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
-        // Same reason as ingest_text: Qdrant rejects upserts into a missing collection and there is
-        // no create_collection tool to reach for.
         self.ensure_collection(&collection).await?;
         let metadata = std::fs::metadata(&path)
             .map_err(|e| McpError::internal(format!("cannot access path: {e}")))?;
 
-        let mut chunks: Vec<DocumentChunk> = Vec::new();
-        let mut file_count = 0usize;
-
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
         if metadata.is_dir() {
             for entry in walkdir::WalkDir::new(&path) {
                 let entry = entry.map_err(|e| McpError::internal(format!("walk error: {e}")))?;
                 if entry.file_type().is_file() {
-                    let base_payload = serde_json::json!({});
-                    match lqm_ingest::extract_file(entry.path(), base_payload) {
-                        Ok(mut extracted) => {
-                            for c in &mut extracted {
-                                c.collection = Some(collection.clone());
-                            }
-                            chunks.append(&mut extracted);
-                            file_count += 1;
-                        }
-                        Err(e) => {
-                            log::warn!("skipping {}: {}", entry.path().display(), e);
-                        }
-                    }
+                    paths.push(entry.path().to_path_buf());
                 }
             }
         } else if metadata.is_file() {
-            let base_payload = serde_json::json!({});
-            match lqm_ingest::extract_file(std::path::Path::new(&path), base_payload) {
-                Ok(mut extracted) => {
-                    for c in &mut extracted {
-                        c.collection = Some(collection.clone());
-                    }
-                    chunks.append(&mut extracted);
-                    file_count += 1;
-                }
-                Err(e) => {
-                    return Err(McpError::internal(format!(
-                        "extraction failed for {}: {e}",
-                        path
-                    )));
-                }
-            }
+            paths.push(std::path::PathBuf::from(&path));
         } else {
             return Err(McpError::internal(format!(
                 "path is not a file or directory: {path}"
             )));
         }
 
-        if chunks.is_empty() {
+        let mut all_chunks: Vec<DocumentChunk> = Vec::new();
+        let mut file_reports: Vec<Value> = Vec::new();
+        let mut ok_files = 0usize;
+
+        for p in paths {
+            let display = p.to_string_lossy().to_string();
+            match lqm_ingest::extract_file(&p, serde_json::json!({})) {
+                Ok(extracted) => {
+                    let mut file_chunk_count = 0usize;
+                    for doc in extracted {
+                        let pieces = self.expand_to_chunks(
+                            &doc.text,
+                            doc.source.or_else(|| Some(display.clone())),
+                            doc.source_type,
+                            collection.clone(),
+                            doc.tags,
+                            doc.project,
+                            doc.last_modified,
+                            Some(&display),
+                        );
+                        file_chunk_count += pieces.len();
+                        all_chunks.extend(pieces);
+                    }
+                    ok_files += 1;
+                    file_reports.push(serde_json::json!({
+                        "path": display,
+                        "ok": true,
+                        "error": null,
+                        "chunks": file_chunk_count,
+                    }));
+                }
+                Err(e) => {
+                    log::warn!("skipping {display}: {e}");
+                    file_reports.push(serde_json::json!({
+                        "path": display,
+                        "ok": false,
+                        "error": e.to_string(),
+                        "chunks": 0,
+                    }));
+                }
+            }
+        }
+
+        if all_chunks.is_empty() {
             return Ok(serde_json::json!({
                 "status": "no files ingested",
-                "files": 0,
+                "files": ok_files,
+                "file_results": file_reports,
                 "inserted": 0,
                 "skipped": 0,
                 "replaced": 0,
@@ -506,13 +580,13 @@ impl LqmServer {
         }
 
         let report = core
-            .embed_and_upsert_batch(chunks)
+            .embed_and_upsert_batch(all_chunks)
             .await
             .map_err(|e| McpError::internal(format!("upsert failed: {e}")))?;
 
         log::info!(
-            "ingested {} files ({} chunks) into '{}' (inserted={} skipped={} replaced={})",
-            file_count,
+            "ingested {} ok files ({} chunks) into '{}' (inserted={} skipped={} replaced={})",
+            ok_files,
             report.chunks,
             collection,
             report.inserted,
@@ -521,8 +595,158 @@ impl LqmServer {
         );
         Ok(serde_json::json!({
             "status": "ok",
-            "files": file_count,
+            "files": ok_files,
+            "file_results": file_reports,
             "collection": collection,
+            "inserted": report.inserted,
+            "skipped": report.skipped,
+            "replaced": report.replaced,
+            "chunks": report.chunks,
+        }))
+    }
+
+    /// Batch ingest: optional lists of texts, paths, and/or URLs into one collection.
+    ///
+    /// Returns per-item results under `file_results` plus aggregate insert/skip/replace stats.
+    /// All items are extracted/chunked first, then a single upsert batch is applied.
+    #[tool]
+    async fn ingest_many(
+        &self,
+        collection: Option<String>,
+        texts: Option<Vec<String>>,
+        paths: Option<Vec<String>>,
+        urls: Option<Vec<String>>,
+        tags: Option<Vec<String>>,
+        project: Option<String>,
+    ) -> McpResult<Value> {
+        let collection = collection.unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+        self.ensure_collection(&collection).await?;
+
+        let mut all_chunks: Vec<DocumentChunk> = Vec::new();
+        let mut file_results: Vec<Value> = Vec::new();
+
+        if let Some(texts) = texts {
+            for (i, text) in texts.into_iter().enumerate() {
+                let src = format!("ingest_many://text/{i}");
+                let pieces = self.expand_to_chunks(
+                    &text,
+                    Some(src.clone()),
+                    Some("text".to_string()),
+                    collection.clone(),
+                    tags.clone(),
+                    project.clone(),
+                    None,
+                    None,
+                );
+                let n = pieces.len();
+                all_chunks.extend(pieces);
+                file_results.push(serde_json::json!({
+                    "path": src,
+                    "ok": true,
+                    "error": null,
+                    "chunks": n,
+                }));
+            }
+        }
+
+        if let Some(paths) = paths {
+            for path in paths {
+                let p = std::path::Path::new(&path);
+                match lqm_ingest::extract_file(p, serde_json::json!({})) {
+                    Ok(extracted) => {
+                        let mut n = 0usize;
+                        for doc in extracted {
+                            let pieces = self.expand_to_chunks(
+                                &doc.text,
+                                doc.source.or_else(|| Some(path.clone())),
+                                doc.source_type,
+                                collection.clone(),
+                                tags.clone().or(doc.tags),
+                                project.clone().or(doc.project),
+                                doc.last_modified,
+                                Some(&path),
+                            );
+                            n += pieces.len();
+                            all_chunks.extend(pieces);
+                        }
+                        file_results.push(serde_json::json!({
+                            "path": path,
+                            "ok": true,
+                            "error": null,
+                            "chunks": n,
+                        }));
+                    }
+                    Err(e) => {
+                        file_results.push(serde_json::json!({
+                            "path": path,
+                            "ok": false,
+                            "error": e.to_string(),
+                            "chunks": 0,
+                        }));
+                    }
+                }
+            }
+        }
+
+        if let Some(urls) = urls {
+            for url in urls {
+                match lqm_ingest::fetch_url(&url, None).await {
+                    Ok(fetched) => {
+                        let st = fetched.source_type.clone();
+                        let pieces = self.expand_to_chunks(
+                            &fetched.text,
+                            Some(url.clone()),
+                            Some(st),
+                            collection.clone(),
+                            tags.clone(),
+                            project.clone(),
+                            None,
+                            Some(&url),
+                        );
+                        let n = pieces.len();
+                        all_chunks.extend(pieces);
+                        file_results.push(serde_json::json!({
+                            "path": url,
+                            "ok": true,
+                            "error": null,
+                            "chunks": n,
+                            "title": fetched.title,
+                        }));
+                    }
+                    Err(e) => {
+                        file_results.push(serde_json::json!({
+                            "path": url,
+                            "ok": false,
+                            "error": e.to_string(),
+                            "chunks": 0,
+                        }));
+                    }
+                }
+            }
+        }
+
+        if all_chunks.is_empty() {
+            return Ok(serde_json::json!({
+                "status": "no items ingested",
+                "file_results": file_results,
+                "inserted": 0,
+                "skipped": 0,
+                "replaced": 0,
+                "chunks": 0,
+                "collection": collection,
+            }));
+        }
+
+        let report = self
+            .core()
+            .embed_and_upsert_batch(all_chunks)
+            .await
+            .map_err(|e| McpError::internal(format!("ingest_many upsert failed: {e}")))?;
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "collection": collection,
+            "file_results": file_results,
             "inserted": report.inserted,
             "skipped": report.skipped,
             "replaced": report.replaced,

@@ -75,8 +75,8 @@ Within a band, list order is the suggested implementation sequence.
 |------|--------|-------------------|--------|
 | **P0** | Document lifecycle + true idempotency | Agents cannot curate KBs without list/delete/replace | **Shipped** |
 | **P1** | Richer retrieval | Better filters/pagination/context budget → better answers without more product | **Shipped** |
-| **P2** | Ingest quality & reporting | Fewer bad chunks; agents can act on per-file errors | Next |
-| **P3** | MCP ↔ API parity + agent ergonomics | Remaining parity (path/url ingest API, docs, errors) | Partial |
+| **P2** | Ingest quality & reporting | Fewer bad chunks; agents can act on per-file errors | **Shipped** |
+| **P3** | MCP ↔ API parity + agent ergonomics | Remaining parity (path/url ingest API, docs, errors) | Next |
 | **P4** | Memories | Agent long-term notes; valuable but after curation/retrieval | Open |
 | **P5** | Nice-to-haves | Lower payoff or out of core headless path | Open |
 
@@ -121,22 +121,27 @@ Within a band, list order is the suggested implementation sequence.
 
 ---
 
-## P2 — Ingest quality & reporting (do next)
+## P2 — Ingest quality & reporting (shipped)
 
 *Medium effort; large quality gain for vaults/code/web agents use daily.*
 
-- [ ] **Structured ingest reports** — per-file `{ path, ok|error, chunks }` for `ingest_path`; same shape where useful for URL/text
-- [ ] **Markdown heading-aware chunking**
-- [ ] **Code-aware chunking** (function/class boundaries where cheap)
-- [ ] **HTML hardening** — title/metadata, size/timeout limits, less boilerplate
-- [ ] **PDF** — enable or document clearly for default MCP deploy if homelab needs it
-- [ ] Optional **`ingest_many`** batch tool for agent loops
+- [x] **Structured ingest reports** — per-file `{ path, ok, error, chunks }` via `file_results` on `ingest_path` / `ingest_many` / text+url
+- [x] **Markdown heading-aware chunking** — AT1–H6 sections then size limits (`chunk_markdown`)
+- [x] **Code-aware chunking** — fn/def/class/struct boundaries (`chunk_code`)
+- [x] **HTML hardening** — `<title>`, strip nav/footer/header, 2MB body cap, timeout
+- [x] **PDF** — `lqm-mcp` enables `lqm-ingest` `pdf` feature by default
+- [x] **`ingest_many`** — batch texts/paths/urls with one upsert and per-item results
 
-**Done when:** bulk path ingest returns actionable errors and chunks respect doc structure.
+**Done when:** bulk path ingest returns actionable errors and chunks respect doc structure. ✅
+
+### Phase P2 notes
+
+- Core: `chunk_for_ingest` / `ChunkKind` dispatch from path extension + source_type
+- MCP: structure-aware chunking on all ingest tools; `file_results` accounting
 
 ---
 
-## P3 — Surface parity + agent ergonomics
+## P3 — Surface parity + agent ergonomics (do next)
 
 *Unlocks “backend + API” replacement and reduces tool-calling mistakes.*
 

@@ -9,6 +9,9 @@ use std::time::Duration;
 /// Default HTTP timeout for remote fetches (seconds).
 pub const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 30;
 
+/// Reject response bodies larger than this (bytes, as received text).
+pub const DEFAULT_MAX_FETCH_BYTES: usize = 2 * 1024 * 1024;
+
 /// Result of fetching and extracting a remote document.
 #[derive(Debug, Clone)]
 pub struct FetchedDocument {
@@ -17,18 +20,51 @@ pub struct FetchedDocument {
     pub content_type: Option<String>,
     /// `"webpage"` for HTML, `"url"` for plain/other text payloads.
     pub source_type: String,
+    /// HTML `<title>` when present.
+    pub title: Option<String>,
 }
 
 /// Strip HTML to readable plain text.
 ///
-/// Removes script/style/noscript blocks, converts common block tags to newlines,
-/// strips remaining tags, decodes a small set of entities, and collapses whitespace.
+/// Removes script/style/noscript/nav/footer/header blocks, converts common block
+/// tags to newlines, strips remaining tags, decodes entities, collapses whitespace.
+/// When a `<title>` is present it is prefixed as `Title: …`.
 pub fn html_to_text(html: &str) -> String {
+    let title = extract_html_title(html);
     let without_blocks = strip_script_style_blocks(html);
     let with_breaks = insert_block_breaks(&without_blocks);
     let no_tags = strip_tags(&with_breaks);
     let decoded = decode_basic_entities(&no_tags);
-    collapse_whitespace(&decoded)
+    let body = collapse_whitespace(&decoded);
+    match title {
+        Some(t) if !t.is_empty() => {
+            if body.is_empty() {
+                format!("Title: {t}")
+            } else {
+                format!("Title: {t}\n\n{body}")
+            }
+        }
+        _ => body,
+    }
+}
+
+/// Extract and decode the first `<title>…</title>` if present.
+pub fn extract_html_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let start = lower.find("<title")?;
+    let after = &html[start..];
+    let after_lower = &lower[start..];
+    let open_end = after_lower.find('>')?;
+    let content_start = open_end + 1;
+    let close_rel = after_lower[content_start..].find("</title>")?;
+    let raw = after[content_start..content_start + close_rel].trim();
+    let decoded = decode_basic_entities(&strip_tags(raw));
+    let cleaned = collapse_whitespace(&decoded);
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 /// Choose an extractor based on Content-Type (or body heuristics).
@@ -86,10 +122,38 @@ pub async fn fetch_url(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let body = response
+    if let Some(len) = response.content_length()
+        && (len as usize) > DEFAULT_MAX_FETCH_BYTES
+    {
+        return Err(ExtractError::ExtractionFailed(format!(
+            "response too large ({len} bytes; max {DEFAULT_MAX_FETCH_BYTES}) for {url}"
+        )));
+    }
+
+    let mut body = response
         .text()
         .await
         .map_err(|e| ExtractError::ExtractionFailed(format!("read body failed for {url}: {e}")))?;
+
+    if body.len() > DEFAULT_MAX_FETCH_BYTES {
+        body.truncate(DEFAULT_MAX_FETCH_BYTES);
+        // Avoid cutting mid-codepoint.
+        while !body.is_char_boundary(body.len()) {
+            body.pop();
+        }
+    }
+
+    let title = if content_type
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .contains("html")
+        || looks_like_html(&body)
+    {
+        extract_html_title(&body)
+    } else {
+        None
+    };
 
     let (text, source_type) = extract_response_text(content_type.as_deref(), &body);
     if text.trim().is_empty() {
@@ -103,6 +167,7 @@ pub async fn fetch_url(
         text,
         content_type,
         source_type,
+        title,
     })
 }
 
@@ -144,7 +209,10 @@ fn strip_script_style_blocks(html: &str) -> String {
 }
 
 fn match_open_block_tag(lower_slice: &str) -> Option<(&'static str, usize)> {
-    for tag in ["script", "style", "noscript"] {
+    // Boilerplate-heavy chrome is dropped entirely (nav/footer/header/aside/svg).
+    for tag in [
+        "script", "style", "noscript", "svg", "nav", "footer", "header", "aside", "iframe",
+    ] {
         let open = format!("<{tag}");
         if lower_slice.starts_with(&open) {
             let rest = &lower_slice[open.len()..];
@@ -278,13 +346,16 @@ mod tests {
           <script>alert("x")</script>
         </head>
         <body>
+          <nav>Skip nav</nav>
           <h1>Hello World</h1>
           <p>This is a <b>paragraph</b> with &amp; entities.</p>
+          <footer>Skip footer</footer>
           <script>evil()</script>
         </body>
         </html>
         "#;
         let text = html_to_text(html);
+        assert!(text.contains("Title: Doc Title"), "text was: {text}");
         assert!(text.contains("Hello World"), "text was: {text}");
         assert!(
             text.contains("This is a paragraph with & entities."),
@@ -292,7 +363,17 @@ mod tests {
         );
         assert!(!text.contains("alert"), "script leaked: {text}");
         assert!(!text.contains("color: red"), "style leaked: {text}");
+        assert!(!text.contains("Skip nav"), "nav leaked: {text}");
+        assert!(!text.contains("Skip footer"), "footer leaked: {text}");
         assert!(!text.contains("<h1>"), "tags leaked: {text}");
+    }
+
+    #[test]
+    fn extract_html_title_works() {
+        assert_eq!(
+            extract_html_title("<html><title>Hello &amp; Co</title></html>").as_deref(),
+            Some("Hello & Co")
+        );
     }
 
     #[test]
