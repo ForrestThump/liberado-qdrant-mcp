@@ -38,22 +38,9 @@ are not copied into a blob store. See ARCHITECTURE and DECISIONS.
 
 Do these **in order** unless a deployment constraint forces a jump.
 
-### 1. Offline MCP integration tests
-
-**Why:** Live smokes skip without Qdrant. PLAN called for turbomcp `channel` +
-`McpTestClient`; hermetic tool tests protect the surface as it grows.
-
-**Ship:**
-
-- [ ] Channel-transport harness with FakeEmbedder (and Qdrant mock or test
-      double as needed).
-- [ ] Cover tool registration + a representative subset of tool behaviors
-      offline; keep live smokes for real Qdrant.
-- [ ] Optional companion: HTTP router tests via `tower::ServiceExt` (same
-      spirit, lower priority than MCP harness).
-
-**Done when:** `cargo test -p lqm-mcp` exercises tools without requiring a live
-Qdrant for the core contract.
+_No active sequenced items right now._ Prefer items from **Later / optional**
+only when a concrete deployment need appears. Shipped work lives in README /
+AGENTS / ARCHITECTURE / DECISIONS (and crate ARCHITECTURE files).
 
 ---
 
@@ -63,6 +50,8 @@ Pick only if a concrete need appears:
 
 | Item | Notes |
 |------|--------|
+| Full offline Qdrant double for ingest/search | MVP uses `McpTestClient` + FakeEmbedder + lazy client; full mock needs a seam |
+| HTTP router tests (`tower::ServiceExt`) | Companion to offline MCP harness |
 | Collection ↔ embedder hard guarantees | Refuse search on dim/model mismatch; optional model label at create |
 | Richer `list_sources` previews | Sample title / first-chunk preview / total chars |
 | Background re-index workers | Only if bulk refresh becomes painful |

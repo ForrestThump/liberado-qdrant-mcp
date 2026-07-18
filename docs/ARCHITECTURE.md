@@ -182,8 +182,9 @@ Homelab-friendly defaults; know these before large corpora:
    HTTP frameworks (it does talk to Qdrant via `qdrant-client`).
 3. **Batching by default.** Embedding is batch-oriented; MCP tools expose batch
    variants.
-4. **Testable seams.** `Embedder` trait + live smokes; channel + `McpTestClient`
-   planned for offline MCP integration tests.
+4. **Testable seams.** `Embedder` trait + live smokes; offline MCP via
+   `McpTestClient` + FakeEmbedder + `QdrantClient::new_lazy` (see `lqm-mcp`
+   ARCHITECTURE).
 5. **Config-driven, not hard-coded.** Model choice, chunking params, semaphore
    size, Qdrant addr are all configurable.
 6. **Surface parity.** MCP, HTTP, and CLI share `expand_to_chunks` and the same

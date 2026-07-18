@@ -52,15 +52,24 @@ impl QdrantClient {
     ///
     /// The gRPC client constructor is synchronous; the `.await` is the health check.
     pub async fn new(url: &str) -> Result<Self, QdrantError> {
-        let qdrant = QdrantGrpc::from_url(url)
-            .build()
-            .map_err(|e| QdrantError::Qdrant(e.to_string()))?;
-        let client = Self {
-            inner: Arc::new(qdrant),
-        };
+        let client = Self::new_lazy(url)?;
         // Fail fast when Qdrant is unreachable rather than on the first tool call.
         client.list_collections().await?;
         Ok(client)
+    }
+
+    /// Build a gRPC client **without** a connectivity probe.
+    ///
+    /// Useful for offline MCP harnesses that need a `RagCore` for tools that never
+    /// touch Qdrant (e.g. `get_embedder_info`, pure validation). Production paths
+    /// should keep using [`Self::new`].
+    pub fn new_lazy(url: &str) -> Result<Self, QdrantError> {
+        let qdrant = QdrantGrpc::from_url(url)
+            .build()
+            .map_err(|e| QdrantError::Qdrant(e.to_string()))?;
+        Ok(Self {
+            inner: Arc::new(qdrant),
+        })
     }
 
     pub async fn list_collections(&self) -> Result<Vec<String>, QdrantError> {

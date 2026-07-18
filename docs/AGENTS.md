@@ -169,9 +169,16 @@ Written by the shared upsert path:
 | `scope` | isolation partition (exact match when filtering) |
 | `clearance` | `public` / `internal` / `confidential` / `restricted` (default `public` on upsert) |
 
-## Live tests
+## Tests
 
-Integration smokes skip when Qdrant is down (CI-safe). Hard-require:
+**Offline MCP** (no Qdrant): `McpTestClient` exercises tool registration and a
+subset of dispatch (`get_embedder_info`, validation errors) with FakeEmbedder:
+
+```bash
+cargo test -p lqm-mcp offline_mcp
+```
+
+**Live smokes** skip when Qdrant is down (CI-safe). Hard-require:
 
 ```bash
 LQM_LIVE=1 QDRANT_URL=http://127.0.0.1:6334 cargo test -p lqm-mcp live_smoke

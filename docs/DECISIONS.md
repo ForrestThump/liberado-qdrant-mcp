@@ -317,3 +317,24 @@ still yields `audio_placeholder` for non-async callers / feature-off builds.
 sessions become an agent need.
 
 ---
+
+## 018 — Offline MCP tests via McpTestClient (not full Qdrant mock)
+
+**Date:** 2026-07-18
+
+**What:** `lqm-mcp` ships offline integration tests that wrap the real
+`#[server]` `LqmServer` in turbomcp’s `McpTestClient`, with `FakeEmbedder` and
+`QdrantClient::new_lazy` (no list_collections health probe). They assert tool
+registration and offline-safe tool dispatch. Live Qdrant smokes remain for
+ingest/search/lifecycle.
+
+**Why:**
+- Hermetic CI coverage of the MCP surface without requiring Qdrant.
+- Exercises real macro-generated handler dispatch (not only inherent methods).
+- Full in-memory Qdrant double would need a large `RagCore` seam; deferred to
+  optional later work.
+
+**Revisit if:** offline ingest/search becomes mandatory for CI or a thin Qdrant
+trait appears for other reasons.
+
+---

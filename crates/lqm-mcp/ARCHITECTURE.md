@@ -51,6 +51,11 @@ All tools stay thin: parse args → `RagCore` / `lqm-ingest`.
 
 ## Testing
 
+- **Offline MCP harness** (always runs in CI): `turbomcp::testing::McpTestClient`
+  wraps `LqmServer` built with `FakeEmbedder` + `QdrantClient::new_lazy` (no
+  connectivity probe). Covers tool registration (`list_tools`) and a subset of
+  dispatch paths that do not need Qdrant I/O (`get_embedder_info`, validation
+  errors, unknown tool). Filter: `cargo test -p lqm-mcp offline_mcp`.
 - **Live smokes** against real Qdrant when available (`LQM_LIVE=1` hard-requires).
-- Workspace CI skips when Qdrant is down; optional `live-qdrant` job runs smokes.
-- Channel transport + `McpTestClient` offline suite is **planned** (see `docs/ROADMAP.md` offline MCP tests / AUDIT TC11), not yet the primary harness.
+- Workspace CI skips live cases when Qdrant is down; optional `live-qdrant` job
+  runs smokes.

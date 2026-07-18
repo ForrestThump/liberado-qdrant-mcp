@@ -2195,6 +2195,156 @@ async fn test_multiple_collections_independence() {
     let _ = core.delete_collection(coll_b).await;
 }
 
+// ── Offline MCP integration (McpTestClient + FakeEmbedder; no live Qdrant) ──
+
+/// Build `LqmServer` with FakeEmbedder and a lazy Qdrant client (no health check).
+///
+/// Suitable for tool-registration and tools that never call Qdrant. Does **not**
+/// replace live smokes for ingest/search/lifecycle.
+#[cfg(test)]
+async fn offline_test_server(dim: usize) -> LqmServer {
+    let qdrant = lqm_core::QdrantClient::new_lazy("http://127.0.0.1:9")
+        .expect("lazy Qdrant client builds without network");
+    let embedder = Box::new(lqm_core::FakeEmbedder::new(dim));
+    let core = RagCore::new(qdrant, embedder, Some(1));
+    LqmServer::new(core).await
+}
+
+/// Tool names that must appear in MCP registration (representative of the surface).
+#[cfg(test)]
+const EXPECTED_OFFLINE_TOOLS: &[&str] = &[
+    "ingest_text",
+    "search",
+    "get_relevant_context",
+    "list_collections",
+    "create_collection",
+    "delete_collection",
+    "get_collection_info",
+    "ingest_path",
+    "ingest_url",
+    "ingest_many",
+    "get_embedder_info",
+    "store_memory",
+    "recall_memories",
+    "list_sources",
+    "list_chunks",
+    "get_source",
+    "expand_context",
+    "delete_by_source",
+    "delete_by_filter",
+];
+
+/// Offline: McpTestClient lists tools from the real `#[server]` handler (no Qdrant).
+#[tokio::test]
+async fn offline_mcp_tool_registration() {
+    use turbomcp::testing::McpTestClient;
+
+    let server = offline_test_server(32).await;
+    let client = McpTestClient::new(server);
+
+    let info = client.server_info();
+    assert_eq!(info.name, "liberado-qdrant-mcp");
+    assert!(!info.version.is_empty(), "version should be set");
+
+    let tools = client.list_tools();
+    assert!(
+        !tools.is_empty(),
+        "registered tools must be non-empty (macro surface)"
+    );
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    for expected in EXPECTED_OFFLINE_TOOLS {
+        assert!(
+            names.contains(expected),
+            "missing tool {expected:?}; have {names:?}"
+        );
+        client.assert_tool_exists(expected);
+    }
+    assert!(
+        tools.len() >= EXPECTED_OFFLINE_TOOLS.len(),
+        "tool count {} < expected {}",
+        tools.len(),
+        EXPECTED_OFFLINE_TOOLS.len()
+    );
+}
+
+/// Offline: get_embedder_info via real tool dispatch (FakeEmbedder, no Qdrant I/O).
+#[tokio::test]
+async fn offline_mcp_get_embedder_info() {
+    use turbomcp::testing::McpTestClient;
+
+    let dim = 48usize;
+    let server = offline_test_server(dim).await;
+    let client = McpTestClient::new(server);
+
+    let result = client
+        .call_tool("get_embedder_info", serde_json::json!({}))
+        .await
+        .expect("get_embedder_info should succeed offline");
+    assert!(!result.is_error(), "tool should not report isError");
+    let text = result
+        .first_text()
+        .expect("embedder info should return text/JSON content");
+    let v: serde_json::Value =
+        serde_json::from_str(text).unwrap_or_else(|_| serde_json::json!({ "raw": text }));
+    // structuredContent may also be present; prefer parsing text or structured
+    let payload = result.structured_content.clone().unwrap_or(v);
+    assert_eq!(payload["status"], "ok", "{payload}");
+    assert_eq!(payload["id"], "fake", "{payload}");
+    assert_eq!(payload["dimension"], dim as u64, "{payload}");
+}
+
+/// Offline: validation paths that fail before any Qdrant RPC (tool dispatch via client).
+#[tokio::test]
+async fn offline_mcp_validation_errors() {
+    use turbomcp::testing::McpTestClient;
+
+    let server = offline_test_server(16).await;
+    let client = McpTestClient::new(server);
+
+    // Empty collection name → RagCore validation (no Qdrant call).
+    let empty_name = client
+        .call_tool("create_collection", serde_json::json!({ "name": "   " }))
+        .await;
+    assert!(
+        empty_name.is_err() || empty_name.as_ref().map(|r| r.is_error()).unwrap_or(false),
+        "empty collection name must fail: {empty_name:?}"
+    );
+    if let Err(e) = &empty_name {
+        let msg = e.to_string().to_lowercase();
+        assert!(
+            msg.contains("empty") || msg.contains("validation") || msg.contains("create"),
+            "unexpected error text: {e}"
+        );
+    }
+
+    // Empty delete filter → validation before Qdrant.
+    let empty_filter = client
+        .call_tool(
+            "delete_by_filter",
+            serde_json::json!({
+                "collection": "offline_dummy"
+            }),
+        )
+        .await;
+    assert!(
+        empty_filter.is_err() || empty_filter.as_ref().map(|r| r.is_error()).unwrap_or(false),
+        "empty delete_by_filter must fail: {empty_filter:?}"
+    );
+}
+
+/// Offline: unknown tool name is rejected by the real handler dispatch.
+#[tokio::test]
+async fn offline_mcp_unknown_tool() {
+    use turbomcp::testing::McpTestClient;
+
+    let server = offline_test_server(8).await;
+    let client = McpTestClient::new(server);
+    let err = client
+        .call_tool("definitely_not_a_real_tool", serde_json::json!({}))
+        .await;
+    assert!(err.is_err(), "unknown tool must error: {err:?}");
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();

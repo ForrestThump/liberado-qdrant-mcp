@@ -29,6 +29,7 @@ pub use context::{
     ContextSource, FormattedContext, format_relevant_context, format_relevant_context_with,
     mmr_rerank,
 };
+pub use embedding::FakeEmbedder;
 pub use hybrid::{
     DEFAULT_HYBRID_ALPHA, DEFAULT_RRF_K, HybridKeywordBackend, SparseEncoding, encode_sparse_tf,
     fuse_dense_keyword, hash_token, hybrid_dense_fetch_limit, hybrid_keyword_backend_from_env,
