@@ -7,8 +7,10 @@ use axum::{
     routing::{get, post},
 };
 use clap::Parser;
+use lqm_core::ErrorCode;
 use lqm_core::constants;
 use lqm_core::format_relevant_context_with;
+use lqm_core::scope::Clearance;
 use lqm_core::structured_error;
 use lqm_core::types::{
     ContextOptions, DocumentChunk, PayloadFilter, SearchFilter, SearchOptions, make_file_result,
@@ -152,7 +154,7 @@ fn map_lqm_err(e: lqm_core::error::LqmError) -> (StatusCode, Json<ErrorResponse>
 }
 
 fn map_msg(
-    code: &str,
+    code: ErrorCode,
     message: impl Into<String>,
     status: StatusCode,
 ) -> (StatusCode, Json<ErrorResponse>) {
@@ -180,7 +182,7 @@ fn expand_chunks(
     last_modified: Option<String>,
     path_hint: Option<&str>,
     scope: Option<String>,
-    clearance: Option<String>,
+    clearance: Option<Clearance>,
 ) -> Vec<DocumentChunk> {
     core.expand_to_chunks(
         text,
@@ -261,7 +263,7 @@ async fn search(
                     tags_should: body.tags_should,
                     tags_must_not: body.tags_must_not,
                     scope: body.scope,
-                    max_clearance: body.max_clearance,
+                    max_clearance: body.max_clearance.and_then(|s| s.parse().ok()),
                 },
                 hybrid: hybrid_on,
                 hybrid_alpha: body.hybrid_alpha,
@@ -302,7 +304,7 @@ async fn get_relevant_context(
                     tags_should: body.tags_should,
                     tags_must_not: body.tags_must_not,
                     scope: body.scope,
-                    max_clearance: body.max_clearance,
+                    max_clearance: body.max_clearance.and_then(|s| s.parse().ok()),
                 },
                 hybrid: body.hybrid.unwrap_or(false),
                 hybrid_alpha: body.hybrid_alpha,
@@ -361,7 +363,7 @@ async fn ingest(
         body.last_modified.map(|ts| ts.to_string()),
         None,
         body.scope,
-        body.clearance,
+        body.clearance.and_then(|s| s.parse().ok()),
     );
     let ts = timestamp_now();
     for c in &mut chunks {
@@ -552,7 +554,7 @@ async fn delete_by_filter(
         project: body.project,
         tags: body.tags,
         scope: body.scope,
-        max_clearance: body.max_clearance,
+        max_clearance: body.max_clearance.and_then(|s| s.parse().ok()),
     };
     let deleted = state
         .core
@@ -608,7 +610,7 @@ async fn ingest_path(
 
     let metadata = std::fs::metadata(&body.path).map_err(|e| {
         map_msg(
-            "io_error",
+            ErrorCode::IoError,
             format!("cannot access path: {e}"),
             StatusCode::BAD_REQUEST,
         )
@@ -619,7 +621,7 @@ async fn ingest_path(
         for entry in walkdir::WalkDir::new(&body.path) {
             let entry = entry.map_err(|e| {
                 map_msg(
-                    "io_error",
+                    ErrorCode::IoError,
                     format!("walk error: {e}"),
                     StatusCode::BAD_REQUEST,
                 )
@@ -632,7 +634,7 @@ async fn ingest_path(
         paths.push(std::path::PathBuf::from(&body.path));
     } else {
         return Err(map_msg(
-            "validation_error",
+            ErrorCode::ValidationError,
             format!("path is not a file or directory: {}", body.path),
             StatusCode::BAD_REQUEST,
         ));
@@ -715,7 +717,7 @@ async fn ingest_url(
 
     let fetched = lqm_ingest::fetch_url(&body.url, None)
         .await
-        .map_err(|e| map_msg("fetch_error", e.to_string(), StatusCode::BAD_REQUEST))?;
+        .map_err(|e| map_msg(ErrorCode::FetchError, e.to_string(), StatusCode::BAD_REQUEST))?;
 
     let source = body.source.unwrap_or_else(|| fetched.url.clone());
     let source_type = body.source_type.unwrap_or(fetched.source_type);
@@ -735,7 +737,7 @@ async fn ingest_url(
     let file_chunks = chunks.len();
     if chunks.is_empty() {
         return Err(map_msg(
-            "validation_error",
+            ErrorCode::ValidationError,
             format!("no chunks for {}", body.url),
             StatusCode::BAD_REQUEST,
         ));
@@ -796,7 +798,7 @@ async fn ingest_many(
                 None,
                 None,
                 body.scope.clone(),
-                body.clearance.clone(),
+                body.clearance.clone().and_then(|s| s.parse().ok()),
             );
             let n = pieces.len();
             all_chunks.extend(pieces);
@@ -823,7 +825,7 @@ async fn ingest_many(
                             doc.last_modified,
                             Some(&path),
                             body.scope.clone(),
-                            body.clearance.clone(),
+                            body.clearance.clone().and_then(|s| s.parse().ok()),
                         );
                         n += pieces.len();
                         all_chunks.extend(pieces);
@@ -853,7 +855,7 @@ async fn ingest_many(
                         None,
                         Some(&url),
                         body.scope.clone(),
-                        body.clearance.clone(),
+                        body.clearance.clone().and_then(|s| s.parse().ok()),
                     );
                     let n = pieces.len();
                     all_chunks.extend(pieces);
@@ -989,6 +991,7 @@ async fn require_bearer(
     req: axum::extract::Request,
     next: Next,
 ) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
+    const BEARER_PREFIX: &str = "Bearer ";
     if let Some(ref expected) = state.api_token {
         let auth = headers
             .get(axum::http::header::AUTHORIZATION)
@@ -1000,7 +1003,7 @@ async fn require_bearer(
             .unwrap_or("");
         if token != expected.as_str() {
             return Err(map_msg(
-                "unauthorized",
+                ErrorCode::Unauthorized,
                 "missing or invalid Authorization bearer token",
                 StatusCode::UNAUTHORIZED,
             ));

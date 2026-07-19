@@ -536,8 +536,8 @@ fn keyword_match(key: &str, value: String) -> Condition {
 }
 
 /// Nested must-condition: clearance is one of the allowed levels (OR).
-fn clearance_max_condition(max_clearance: &str) -> Option<Condition> {
-    let levels = crate::scope::allowed_clearance_levels(max_clearance);
+fn clearance_max_condition(max_clearance: Clearance) -> Option<Condition> {
+    let levels = max_clearance.allowed_levels();
     if levels.is_empty() {
         return None;
     }
@@ -561,15 +561,15 @@ fn clearance_max_condition(max_clearance: &str) -> Option<Condition> {
 fn push_scope_and_clearance(
     must: &mut Vec<Condition>,
     scope: Option<&str>,
-    max_clearance: Option<&str>,
+    max_clearance: Option<Clearance>,
 ) {
     if let Some(s) = scope.map(str::trim).filter(|s| !s.is_empty()) {
         must.push(keyword_match(payload_schema::SCOPE, s.to_string()));
     }
-    if let Some(max) = max_clearance.map(str::trim).filter(|s| !s.is_empty())
-        && let Some(cond) = clearance_max_condition(max)
-    {
-        must.push(cond);
+    if let Some(max) = max_clearance {
+        if let Some(cond) = clearance_max_condition(max) {
+            must.push(cond);
+        }
     }
 }
 
@@ -580,20 +580,20 @@ pub fn payload_filter_to_qdrant(f: &PayloadFilter) -> Option<Filter> {
     }
     let mut must = Vec::new();
     if let Some(ref source) = f.source {
-        must.push(keyword_match("source", source.clone()));
+        must.push(keyword_match(payload_schema::SOURCE, source.clone()));
     }
     if let Some(ref st) = f.source_type {
-        must.push(keyword_match("source_type", st.clone()));
+        must.push(keyword_match(payload_schema::SOURCE_TYPE, st.clone()));
     }
     if let Some(ref project) = f.project {
-        must.push(keyword_match("project", project.clone()));
+        must.push(keyword_match(payload_schema::PROJECT, project.clone()));
     }
     if let Some(ref tags) = f.tags {
         for t in tags {
-            must.push(keyword_match("tags", t.clone()));
+            must.push(keyword_match(payload_schema::TAGS, t.clone()));
         }
     }
-    push_scope_and_clearance(&mut must, f.scope.as_deref(), f.max_clearance.as_deref());
+    push_scope_and_clearance(&mut must, f.scope.as_deref(), f.max_clearance);
     if must.is_empty() {
         None
     } else {
@@ -616,30 +616,30 @@ pub fn search_filter_to_qdrant(f: &SearchFilter) -> Option<Filter> {
     let mut must_not = Vec::new();
 
     if let Some(ref source) = f.source {
-        must.push(keyword_match("source", source.clone()));
+        must.push(keyword_match(payload_schema::SOURCE, source.clone()));
     }
     if let Some(ref st) = f.source_type {
-        must.push(keyword_match("source_type", st.clone()));
+        must.push(keyword_match(payload_schema::SOURCE_TYPE, st.clone()));
     }
     if let Some(ref project) = f.project {
-        must.push(keyword_match("project", project.clone()));
+        must.push(keyword_match(payload_schema::PROJECT, project.clone()));
     }
     if let Some(ref tags) = f.tags {
         for t in tags {
-            must.push(keyword_match("tags", t.clone()));
+            must.push(keyword_match(payload_schema::TAGS, t.clone()));
         }
     }
     if let Some(ref tags) = f.tags_should {
         for t in tags {
-            should.push(keyword_match("tags", t.clone()));
+            should.push(keyword_match(payload_schema::TAGS, t.clone()));
         }
     }
     if let Some(ref tags) = f.tags_must_not {
         for t in tags {
-            must_not.push(keyword_match("tags", t.clone()));
+            must_not.push(keyword_match(payload_schema::TAGS, t.clone()));
         }
     }
-    push_scope_and_clearance(&mut must, f.scope.as_deref(), f.max_clearance.as_deref());
+    push_scope_and_clearance(&mut must, f.scope.as_deref(), f.max_clearance);
 
     if must.is_empty() && should.is_empty() && must_not.is_empty() {
         None
@@ -690,7 +690,7 @@ where
 fn scored_point_to_search_result(sp: &ScoredPoint) -> SearchResult {
     let text = sp
         .payload
-        .get("text")
+        .get(payload_schema::TEXT)
         .and_then(|v| v.kind.as_ref())
         .and_then(|k| match k {
             qdrant_client::qdrant::value::Kind::StringValue(s) => Some(s.clone()),
@@ -1561,7 +1561,7 @@ impl RagCore {
         last_modified: Option<String>,
         path_hint: Option<&str>,
         scope: Option<String>,
-        clearance: Option<String>,
+        clearance: Option<Clearance>,
     ) -> Vec<DocumentChunk> {
         let pieces = self.chunk_for_ingest(
             text,
@@ -1781,11 +1781,7 @@ pub fn build_point_payload(
         }
     }
     // Always write clearance when set or default to public for clearance-safe filters.
-    let clearance = chunk
-        .clearance
-        .as_deref()
-        .and_then(crate::scope::normalize_clearance)
-        .unwrap_or(crate::scope::DEFAULT_CLEARANCE);
+    let clearance = chunk.clearance.unwrap_or(crate::scope::DEFAULT_CLEARANCE);
     payload.insert(
         payload_schema::CLEARANCE.to_string(),
         serde_json::Value::String(clearance.to_string()),
@@ -1916,7 +1912,7 @@ mod tests {
             tags_should: Some(vec!["c".into()]),
             tags_must_not: Some(vec!["d".into()]),
             scope: Some("team-a".into()),
-            max_clearance: Some("internal".into()),
+            max_clearance: Some(Clearance::Internal),
         };
         let qf = search_filter_to_qdrant(&f).expect("filter");
         // Decomposition of must conditions for a full filter:
@@ -1941,14 +1937,6 @@ mod tests {
         })
         .expect("scope filter");
         assert_eq!(scoped.must.len(), 1);
-
-        // Unknown max_clearance adds no clearance condition (strict pure helper rejects in unit tests)
-        let bad_clear = search_filter_to_qdrant(&SearchFilter {
-            max_clearance: Some("nope".into()),
-            ..Default::default()
-        });
-        // empty allowed list → no condition → filter still empty of useful must
-        assert!(bad_clear.is_none());
     }
 
     #[tokio::test]

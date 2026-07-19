@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::scope::Clearance;
+
 pub type Payload = serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,7 +27,7 @@ pub struct DocumentChunk {
     /// Isolation partition (e.g. team / tenant-like agent scope). Exact match on search.
     pub scope: Option<String>,
     /// Sensitivity level: public | internal | confidential | restricted.
-    pub clearance: Option<String>,
+    pub clearance: Option<Clearance>,
 }
 
 impl DocumentChunk {
@@ -124,7 +126,7 @@ pub struct PayloadFilter {
     /// Exact scope partition match.
     pub scope: Option<String>,
     /// Max clearance level (admits this level and all lower).
-    pub max_clearance: Option<String>,
+    pub max_clearance: Option<Clearance>,
 }
 
 impl PayloadFilter {
@@ -138,11 +140,7 @@ impl PayloadFilter {
                 .as_ref()
                 .map(|s| s.trim().is_empty())
                 .unwrap_or(true)
-            && self
-                .max_clearance
-                .as_ref()
-                .map(|s| s.trim().is_empty())
-                .unwrap_or(true)
+            && self.max_clearance.is_none()
     }
 
     pub fn for_source(source: impl Into<String>) -> Self {
@@ -168,7 +166,7 @@ pub struct SearchFilter {
     /// Exact `scope` payload match — excludes other scopes when set.
     pub scope: Option<String>,
     /// Admit points with clearance at or below this level (`public`…`restricted`).
-    pub max_clearance: Option<String>,
+    pub max_clearance: Option<Clearance>,
 }
 
 impl SearchFilter {
@@ -192,11 +190,7 @@ impl SearchFilter {
                 .as_ref()
                 .map(|s| s.trim().is_empty())
                 .unwrap_or(true)
-            && self
-                .max_clearance
-                .as_ref()
-                .map(|s| s.trim().is_empty())
-                .unwrap_or(true)
+            && self.max_clearance.is_none()
     }
 }
 
