@@ -147,18 +147,28 @@ impl EmbedderConfig {
         Ok(config_file.embedding)
     }
 
-    pub fn from_env() -> Self {
-        let backend = std::env::var(constants::ENV_EMBEDDING_BACKEND)
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(
-                constants::DEFAULT_BACKEND
-                    .parse()
-                    .unwrap_or(EmbedderBackend::Fastembed),
-            );
-        let dimension = std::env::var(constants::ENV_EMBEDDING_DIMENSION)
-            .ok()
-            .and_then(|v| v.parse().ok());
+    /// Load embedder settings from process environment.
+    ///
+    /// When `EMBEDDING_BACKEND` is **unset**, uses the default backend.
+    /// When it is **set** to an unrecognized value, returns
+    /// [`LqmError::Validation`] (fail loud — no silent Fastembed fallback).
+    #[allow(clippy::result_large_err)]
+    pub fn from_env() -> Result<Self, LqmError> {
+        Self::from_env_lookup(|key| std::env::var(key).ok())
+    }
+
+    /// Same rules as [`Self::from_env`], but reads values via `get` (for tests).
+    #[allow(clippy::result_large_err)]
+    pub fn from_env_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, LqmError> {
+        let backend = match get(constants::ENV_EMBEDDING_BACKEND) {
+            Some(v) => v
+                .parse::<EmbedderBackend>()
+                .map_err(|e: UnknownBackend| LqmError::Validation(e.to_string()))?,
+            None => constants::DEFAULT_BACKEND
+                .parse()
+                .unwrap_or(EmbedderBackend::Fastembed),
+        };
+        let dimension = get(constants::ENV_EMBEDDING_DIMENSION).and_then(|v| v.parse().ok());
 
         let mut config = Self {
             backend,
@@ -168,34 +178,30 @@ impl EmbedderConfig {
             openai: None,
         };
 
-        if let Ok(model) = std::env::var(constants::ENV_EMBEDDING_OLLAMA_MODEL) {
+        if let Some(model) = get(constants::ENV_EMBEDDING_OLLAMA_MODEL) {
             config.ollama = Some(OllamaSection {
-                url: std::env::var(constants::ENV_EMBEDDING_OLLAMA_URL)
-                    .unwrap_or_else(|_| default_ollama_url()),
+                url: get(constants::ENV_EMBEDDING_OLLAMA_URL).unwrap_or_else(default_ollama_url),
                 model,
-                dimension: std::env::var(constants::ENV_EMBEDDING_OLLAMA_DIMENSION)
-                    .ok()
+                dimension: get(constants::ENV_EMBEDDING_OLLAMA_DIMENSION)
                     .and_then(|v| v.parse().ok()),
             });
         }
 
-        if let Ok(model) = std::env::var(constants::ENV_EMBEDDING_OPENAI_MODEL) {
+        if let Some(model) = get(constants::ENV_EMBEDDING_OPENAI_MODEL) {
             config.openai = Some(OpenAISection {
-                url: std::env::var(constants::ENV_EMBEDDING_OPENAI_URL)
-                    .unwrap_or_else(|_| default_openai_url()),
+                url: get(constants::ENV_EMBEDDING_OPENAI_URL).unwrap_or_else(default_openai_url),
                 model,
-                api_key: std::env::var(constants::ENV_EMBEDDING_OPENAI_API_KEY).ok(),
-                dimension: std::env::var(constants::ENV_EMBEDDING_OPENAI_DIMENSION)
-                    .ok()
+                api_key: get(constants::ENV_EMBEDDING_OPENAI_API_KEY),
+                dimension: get(constants::ENV_EMBEDDING_OPENAI_DIMENSION)
                     .and_then(|v| v.parse().ok()),
             });
         }
 
-        if let Ok(model) = std::env::var(constants::ENV_EMBEDDING_FASTEMBED_MODEL) {
+        if let Some(model) = get(constants::ENV_EMBEDDING_FASTEMBED_MODEL) {
             config.fastembed = Some(FastembedSection { model: Some(model) });
         }
 
-        config
+        Ok(config)
     }
 
     #[allow(clippy::result_large_err)]
@@ -206,13 +212,23 @@ impl EmbedderConfig {
                 return Self::load(path);
             }
         }
-        Ok(Self::from_env())
+        Self::from_env()
     }
 }
 
 impl Default for EmbedderConfig {
+    /// Pure defaults without reading the environment (avoids panicking if
+    /// `EMBEDDING_BACKEND` is set to a bad value during `Default` construction).
+    /// Prefer [`EmbedderConfig::from_env`] / [`EmbedderConfig::load_or_default`]
+    /// for production config loading.
     fn default() -> Self {
-        Self::from_env()
+        Self {
+            backend: EmbedderBackend::Fastembed,
+            dimension: None,
+            fastembed: None,
+            ollama: None,
+            openai: None,
+        }
     }
 }
 
@@ -409,10 +425,55 @@ api_key = "sk-test"
 
     #[test]
     fn test_load_or_default_no_file() {
-        let result = EmbedderConfig::load_or_default(None);
+        // Isolated from process env so CI with EMBEDDING_BACKEND set still passes.
+        let result = EmbedderConfig::from_env_lookup(|_| None);
         assert!(result.is_ok());
         let config = result.unwrap();
         assert_eq!(config.backend, EmbedderBackend::Fastembed);
+    }
+
+    #[test]
+    fn test_from_env_lookup_unset_defaults() {
+        let config = EmbedderConfig::from_env_lookup(|_| None).expect("unset env");
+        assert_eq!(config.backend, EmbedderBackend::Fastembed);
+    }
+
+    #[test]
+    fn test_from_env_lookup_rejects_unknown_backend() {
+        let result = EmbedderConfig::from_env_lookup(|key| {
+            if key == constants::ENV_EMBEDDING_BACKEND {
+                Some("not-a-real-backend-xyz".into())
+            } else {
+                None
+            }
+        });
+        let err = result.expect_err("unknown backend must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not-a-real-backend-xyz"),
+            "error should mention bad value: {msg}"
+        );
+        assert!(
+            msg.contains("fake") || msg.contains("fastembed") || msg.contains("expected"),
+            "error should hint expected backends: {msg}"
+        );
+        match err {
+            LqmError::Validation(_) => {}
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_from_env_lookup_accepts_known_backend() {
+        let config = EmbedderConfig::from_env_lookup(|key| {
+            if key == constants::ENV_EMBEDDING_BACKEND {
+                Some("fake".into())
+            } else {
+                None
+            }
+        })
+        .expect("fake backend");
+        assert_eq!(config.backend, EmbedderBackend::Fake);
     }
 
     #[test]
