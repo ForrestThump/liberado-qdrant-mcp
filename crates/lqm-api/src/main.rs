@@ -998,8 +998,12 @@ async fn require_bearer(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         let token = auth
-            .strip_prefix("Bearer ")
-            .or_else(|| auth.strip_prefix("bearer "))
+            .strip_prefix(BEARER_PREFIX)
+            .or_else(|| {
+                let lower = auth.to_ascii_lowercase();
+                lower.strip_prefix(BEARER_PREFIX.to_ascii_lowercase())
+                    .map(|_| &auth[BEARER_PREFIX.len()..])
+            })
             .unwrap_or("");
         if token != expected.as_str() {
             return Err(map_msg(

@@ -142,12 +142,6 @@ pub fn scope_matches(point_scope: Option<&str>, required_scope: &str) -> bool {
     }
 }
 
-/// Parse an optional clearance string, returning `None` for `None` input.
-/// Invalid values produce an error describing the valid options.
-pub fn parse_optional_clearance(raw: Option<String>) -> Option<Clearance> {
-    raw.and_then(|s| s.parse().ok())
-}
-
 /// Combined pure check used by tests and optional post-filters.
 pub fn point_in_scope(
     point_scope: Option<&str>,

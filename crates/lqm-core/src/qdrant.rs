@@ -11,6 +11,7 @@ use crate::hybrid::{
     tokenize_for_keyword,
 };
 use crate::lifecycle::decide_source_reingest;
+use crate::scope::Clearance;
 use crate::types::{
     ChunkConfig, CollectionInfoSummary, DocumentChunk, EmbedderInfo, INDEX_FIELDS, IngestReport,
     PayloadFilter, ReingestAction, SearchFilter, SearchOptions, SearchPage, SearchResult,

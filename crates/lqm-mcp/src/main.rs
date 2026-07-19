@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use lqm_core::RagCore;
 use lqm_core::constants;
 use lqm_core::format_relevant_context_with;
+use lqm_core::scope::Clearance;
 use lqm_core::types::{
     ContextOptions, DocumentChunk, PayloadFilter, SearchFilter, SearchOptions, make_file_result,
     resolve_collection,
