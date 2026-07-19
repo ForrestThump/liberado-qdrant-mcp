@@ -1,7 +1,7 @@
 //! Agent-friendly formatting of search results as LLM-ready context.
 
 use crate::constants;
-use crate::types::{ContextOptions, SearchResult, payload_str};
+use crate::types::{ContextOptions, SearchResult, payload_schema, payload_str};
 use serde::Serialize;
 use std::collections::HashSet;
 
