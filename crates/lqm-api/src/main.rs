@@ -10,7 +10,8 @@ use clap::Parser;
 use lqm_core::ErrorCode;
 use lqm_core::constants;
 use lqm_core::format_relevant_context_with;
-use lqm_core::scope::Clearance;
+use lqm_core::response_keys;
+use lqm_core::scope::{Clearance, parse_optional_clearance};
 use lqm_core::structured_error;
 use lqm_core::types::{
     ContextOptions, DocumentChunk, PayloadFilter, SearchFilter, SearchOptions, make_file_result,
@@ -169,6 +170,19 @@ fn map_msg(
     )
 }
 
+/// Parse optional clearance/max_clearance from HTTP body; blank → None, invalid → 400.
+fn parse_body_clearance(
+    value: Option<&str>,
+) -> Result<Option<Clearance>, (StatusCode, Json<ErrorResponse>)> {
+    parse_optional_clearance(value).map_err(|e| {
+        map_msg(
+            ErrorCode::ValidationError,
+            e.to_string(),
+            StatusCode::BAD_REQUEST,
+        )
+    })
+}
+
 /// Expand text into structure-aware chunks with stable payload indices.
 #[allow(clippy::too_many_arguments)]
 fn expand_chunks(
@@ -263,7 +277,7 @@ async fn search(
                     tags_should: body.tags_should,
                     tags_must_not: body.tags_must_not,
                     scope: body.scope,
-                    max_clearance: body.max_clearance.and_then(|s| s.parse().ok()),
+                    max_clearance: parse_body_clearance(body.max_clearance.as_deref())?,
                 },
                 hybrid: hybrid_on,
                 hybrid_alpha: body.hybrid_alpha,
@@ -273,11 +287,11 @@ async fn search(
         .map_err(map_lqm_err)?;
 
     Ok(Json(serde_json::json!({
-        "results": page.results,
-        "offset": page.offset,
-        "limit": page.limit,
-        "has_more": page.has_more,
-        "next_offset": page.next_offset,
+        (response_keys::RESULTS): page.results,
+        (response_keys::OFFSET): page.offset,
+        (response_keys::LIMIT): page.limit,
+        (response_keys::HAS_MORE): page.has_more,
+        (response_keys::NEXT_OFFSET): page.next_offset,
         "hybrid": hybrid_on,
     })))
 }
@@ -304,7 +318,7 @@ async fn get_relevant_context(
                     tags_should: body.tags_should,
                     tags_must_not: body.tags_must_not,
                     scope: body.scope,
-                    max_clearance: body.max_clearance.and_then(|s| s.parse().ok()),
+                    max_clearance: parse_body_clearance(body.max_clearance.as_deref())?,
                 },
                 hybrid: body.hybrid.unwrap_or(false),
                 hybrid_alpha: body.hybrid_alpha,
@@ -325,17 +339,17 @@ async fn get_relevant_context(
     );
 
     Ok(Json(serde_json::json!({
-        "status": "ok",
+        (response_keys::STATUS): response_keys::OK,
         "query": body.query,
-        "collection": coll,
+        (response_keys::COLLECTION): coll,
         "passage_count": formatted.passage_count,
         "truncated_by_budget": formatted.truncated_by_budget,
-        "offset": page.offset,
-        "limit": page.limit,
-        "has_more": page.has_more,
-        "next_offset": page.next_offset,
+        (response_keys::OFFSET): page.offset,
+        (response_keys::LIMIT): page.limit,
+        (response_keys::HAS_MORE): page.has_more,
+        (response_keys::NEXT_OFFSET): page.next_offset,
         "context": formatted.context,
-        "sources": formatted.sources,
+        (response_keys::SOURCES): formatted.sources,
     })))
 }
 
@@ -363,7 +377,7 @@ async fn ingest(
         body.last_modified.map(|ts| ts.to_string()),
         None,
         body.scope,
-        body.clearance.and_then(|s| s.parse().ok()),
+        parse_body_clearance(body.clearance.as_deref())?,
     );
     let ts = timestamp_now();
     for c in &mut chunks {
@@ -554,7 +568,7 @@ async fn delete_by_filter(
         project: body.project,
         tags: body.tags,
         scope: body.scope,
-        max_clearance: body.max_clearance.and_then(|s| s.parse().ok()),
+        max_clearance: parse_body_clearance(body.max_clearance.as_deref())?,
     };
     let deleted = state
         .core
@@ -562,8 +576,8 @@ async fn delete_by_filter(
         .await
         .map_err(map_lqm_err)?;
     Ok(Json(serde_json::json!({
-        "status": "ok",
-        "collection": name,
+        (response_keys::STATUS): response_keys::OK,
+        (response_keys::COLLECTION): name,
         "deleted": deleted,
         "filter": filter,
     })))
@@ -787,6 +801,7 @@ async fn ingest_many(
 
     let mut all_chunks = Vec::new();
     let mut file_results = Vec::new();
+    let clearance = parse_body_clearance(body.clearance.as_deref())?;
 
     if let Some(texts) = body.texts {
         for (i, text) in texts.into_iter().enumerate() {
@@ -802,7 +817,7 @@ async fn ingest_many(
                 None,
                 None,
                 body.scope.clone(),
-                body.clearance.clone().and_then(|s| s.parse().ok()),
+                clearance,
             );
             let n = pieces.len();
             all_chunks.extend(pieces);
@@ -829,7 +844,7 @@ async fn ingest_many(
                             doc.last_modified,
                             Some(&path),
                             body.scope.clone(),
-                            body.clearance.clone().and_then(|s| s.parse().ok()),
+                            clearance,
                         );
                         n += pieces.len();
                         all_chunks.extend(pieces);
@@ -859,7 +874,7 @@ async fn ingest_many(
                         None,
                         Some(&url),
                         body.scope.clone(),
-                        body.clearance.clone().and_then(|s| s.parse().ok()),
+                        clearance,
                     );
                     let n = pieces.len();
                     all_chunks.extend(pieces);

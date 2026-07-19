@@ -52,7 +52,7 @@ pub use reconstruction::{
 };
 pub use scope::{
     Clearance, DEFAULT_CLEARANCE, UnknownClearance, clearance_allowed, normalize_clearance,
-    point_in_scope, scope_matches,
+    parse_optional_clearance, point_in_scope, scope_matches,
 };
 pub use source_type::{SourceType, UnknownSourceType};
 pub use types::{

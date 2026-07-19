@@ -58,6 +58,11 @@ Pick only if a concrete need appears:
 | Dioxus SPA | Demo UX; agents should prefer MCP/HTTP |
 | WASM core | Browser-side story, not agent replacement |
 | Chat-with-context tool | Only if a host cannot generate from `get_relevant_context` |
+| Magic-values audit: `SourceType` on domain types | Still `Option<String>` on chunks/filters; enum exists in `source_type.rs` |
+| Magic-values audit: `Importance` / `Scope` newtypes | Clamp/reject empty at construction; not started |
+| Magic-values audit: full `response_keys` migration | Partial wiring in MCP/API; remaining JSON builders still use string literals |
+| Magic-values audit: ingest/ASR string constants | `lqm-ingest` payload keys / content-type / API path literals |
+| Magic-values audit: FNV + binary port defaults | Named constants in hybrid.rs and CLI/MCP/API listen defaults |
 
 ---
 

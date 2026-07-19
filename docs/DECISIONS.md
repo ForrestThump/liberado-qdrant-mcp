@@ -338,3 +338,26 @@ ingest/search/lifecycle.
 trait appears for other reasons.
 
 ---
+
+## 019 — Fail-closed clearance parse + strict EMBEDDING_BACKEND when set
+
+**Date:** 2026-07-18
+
+**What:** Boundary strings for `clearance` / `max_clearance` go through a shared
+`parse_optional_clearance` helper in `lqm-core`: blank/whitespace → absent
+(`None`); known level → typed `Clearance`; any other non-blank token →
+validation error on both MCP and HTTP. Search/delete never drop an invalid
+`max_clearance` and admit all levels. When `EMBEDDING_BACKEND` is **set** to an
+unrecognized value, `EmbedderConfig::from_env` / `from_env_lookup` returns
+`LqmError::Validation` (no silent Fastembed fallback). When the var is **unset**,
+default backend behavior is unchanged.
+
+**Why:**
+- Fail-open clearance filters are a security footgun for agent isolation.
+- Silent backend typos look like “config ignored” and are hard to debug.
+- One pure helper keeps MCP and HTTP from diverging again.
+
+**Revisit if:** clients need soft-warnings with defaulting, or multi-tenant
+auth replaces payload clearance ceilings.
+
+---

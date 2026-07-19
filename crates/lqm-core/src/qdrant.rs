@@ -988,7 +988,7 @@ impl RagCore {
             .await?;
         Ok(payloads
             .iter()
-            .filter_map(|p| payload_str(p, "ingest_hash"))
+            .filter_map(|p| payload_str(p, payload_schema::INGEST_HASH))
             .collect())
     }
 
@@ -1003,7 +1003,7 @@ impl RagCore {
             .await?;
         let mut map: HashMap<String, SourceSummary> = HashMap::new();
         for p in payloads {
-            let Some(source) = payload_str(&p, "source") else {
+            let Some(source) = payload_str(&p, payload_schema::SOURCE) else {
                 continue;
             };
             let entry = map.entry(source.clone()).or_insert_with(|| SourceSummary {
@@ -1014,10 +1014,10 @@ impl RagCore {
             });
             entry.count += 1;
             if entry.source_type.is_none() {
-                entry.source_type = payload_str(&p, "source_type");
+                entry.source_type = payload_str(&p, payload_schema::SOURCE_TYPE);
             }
             if entry.last_modified.is_none() {
-                entry.last_modified = payload_str(&p, "last_modified");
+                entry.last_modified = payload_str(&p, payload_schema::LAST_MODIFIED);
             }
         }
         let mut sources: Vec<_> = map.into_values().collect();

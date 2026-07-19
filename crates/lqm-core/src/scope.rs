@@ -115,6 +115,21 @@ pub fn normalize_clearance(level: &str) -> Option<Clearance> {
     level.parse().ok()
 }
 
+/// Parse an optional clearance from an MCP/HTTP boundary string.
+///
+/// - `None` or blank/whitespace → `Ok(None)` (absent; no filter / default ingest)
+/// - known level (case-insensitive, trimmed) → `Ok(Some(Clearance))`
+/// - any other non-blank token → `Err(UnknownClearance)` (fail closed; never admit-all)
+pub fn parse_optional_clearance(
+    value: Option<&str>,
+) -> Result<Option<Clearance>, UnknownClearance> {
+    match value {
+        None => Ok(None),
+        Some(s) if s.trim().is_empty() => Ok(None),
+        Some(s) => s.parse().map(Some),
+    }
+}
+
 /// Whether a point's clearance is allowed under `max_clearance`.
 ///
 /// Missing / empty point clearance is treated as [`DEFAULT_CLEARANCE`].
@@ -239,6 +254,33 @@ mod tests {
     fn normalize_clearance_works() {
         assert_eq!(normalize_clearance(" Internal "), Some(Clearance::Internal));
         assert_eq!(normalize_clearance("weird"), None);
+    }
+
+    #[test]
+    fn parse_optional_clearance_blank_valid_invalid() {
+        assert_eq!(parse_optional_clearance(None).unwrap(), None);
+        assert_eq!(parse_optional_clearance(Some("")).unwrap(), None);
+        assert_eq!(parse_optional_clearance(Some("   ")).unwrap(), None);
+        assert_eq!(
+            parse_optional_clearance(Some("internal")).unwrap(),
+            Some(Clearance::Internal)
+        );
+        assert_eq!(
+            parse_optional_clearance(Some(" CONFIDENTIAL ")).unwrap(),
+            Some(Clearance::Confidential)
+        );
+        assert_eq!(
+            parse_optional_clearance(Some("PUBLIC")).unwrap(),
+            Some(Clearance::Public)
+        );
+        let err = parse_optional_clearance(Some("nope")).unwrap_err();
+        assert!(err.to_string().contains("nope"), "{err}");
+        let err2 = parse_optional_clearance(Some("top-secret")).unwrap_err();
+        assert!(err2.to_string().contains("top-secret"), "{err2}");
+        assert!(
+            err2.to_string().contains("public"),
+            "error should list expected levels: {err2}"
+        );
     }
 
     #[test]
