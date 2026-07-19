@@ -567,10 +567,10 @@ fn push_scope_and_clearance(
     if let Some(s) = scope.map(str::trim).filter(|s| !s.is_empty()) {
         must.push(keyword_match(payload_schema::SCOPE, s.to_string()));
     }
-    if let Some(max) = max_clearance {
-        if let Some(cond) = clearance_max_condition(max) {
-            must.push(cond);
-        }
+    if let Some(max) = max_clearance
+        && let Some(cond) = clearance_max_condition(max)
+    {
+        must.push(cond);
     }
 }
 
@@ -1587,7 +1587,7 @@ impl RagCore {
                 importance: None,
                 memory_id: None,
                 scope: scope.clone(),
-                clearance: clearance.clone(),
+                clearance,
             })
             .collect()
     }

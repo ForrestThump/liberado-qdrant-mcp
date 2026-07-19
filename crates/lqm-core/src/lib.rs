@@ -51,7 +51,7 @@ pub use reconstruction::{
     sort_source_chunks, source_chunk_from_payload, source_document_from_chunks,
 };
 pub use scope::{
-    Clearance, UnknownClearance, DEFAULT_CLEARANCE, clearance_allowed, normalize_clearance,
+    Clearance, DEFAULT_CLEARANCE, UnknownClearance, clearance_allowed, normalize_clearance,
     point_in_scope, scope_matches,
 };
 pub use source_type::{SourceType, UnknownSourceType};

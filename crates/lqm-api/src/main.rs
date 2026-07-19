@@ -715,9 +715,13 @@ async fn ingest_url(
         .await
         .map_err(map_lqm_err)?;
 
-    let fetched = lqm_ingest::fetch_url(&body.url, None)
-        .await
-        .map_err(|e| map_msg(ErrorCode::FetchError, e.to_string(), StatusCode::BAD_REQUEST))?;
+    let fetched = lqm_ingest::fetch_url(&body.url, None).await.map_err(|e| {
+        map_msg(
+            ErrorCode::FetchError,
+            e.to_string(),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
     let source = body.source.unwrap_or_else(|| fetched.url.clone());
     let source_type = body.source_type.unwrap_or(fetched.source_type);
@@ -1001,7 +1005,8 @@ async fn require_bearer(
             .strip_prefix(BEARER_PREFIX)
             .or_else(|| {
                 let lower = auth.to_ascii_lowercase();
-                lower.strip_prefix(BEARER_PREFIX.to_ascii_lowercase())
+                lower
+                    .strip_prefix("bearer ")
                     .map(|_| &auth[BEARER_PREFIX.len()..])
             })
             .unwrap_or("");

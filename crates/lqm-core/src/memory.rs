@@ -75,7 +75,10 @@ pub fn memory_note_to_chunk(
     collection: &str,
     now_unix_secs: u64,
 ) -> DocumentChunk {
-    let importance = note.importance.unwrap_or(constants::DEFAULT_MEMORY_IMPORTANCE).clamp(0.0, 1.0);
+    let importance = note
+        .importance
+        .unwrap_or(constants::DEFAULT_MEMORY_IMPORTANCE)
+        .clamp(0.0, 1.0);
     let memory_id = note
         .memory_id
         .clone()
@@ -230,7 +233,10 @@ pub fn rank_memory_hits(
                     r.payload
                         .get(payload_schema::SOURCE)
                         .and_then(|v| v.as_str())
-                        .map(|s| s.trim_start_matches(constants::MEMORY_SOURCE_PREFIX).to_string())
+                        .map(|s| {
+                            s.trim_start_matches(constants::MEMORY_SOURCE_PREFIX)
+                                .to_string()
+                        })
                 });
             let tags = r.payload.get(payload_schema::TAGS).and_then(|v| {
                 v.as_array().map(|a| {

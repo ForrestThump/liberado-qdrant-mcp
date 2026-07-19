@@ -151,7 +151,11 @@ impl EmbedderConfig {
         let backend = std::env::var(constants::ENV_EMBEDDING_BACKEND)
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(constants::DEFAULT_BACKEND.parse().unwrap_or(EmbedderBackend::Fastembed));
+            .unwrap_or(
+                constants::DEFAULT_BACKEND
+                    .parse()
+                    .unwrap_or(EmbedderBackend::Fastembed),
+            );
         let dimension = std::env::var(constants::ENV_EMBEDDING_DIMENSION)
             .ok()
             .and_then(|v| v.parse().ok());
@@ -227,7 +231,11 @@ fn list_available_backends() -> Vec<EmbedderBackend> {
 }
 
 fn format_backend_list(backends: &[EmbedderBackend]) -> String {
-    backends.iter().map(|b| b.as_str()).collect::<Vec<_>>().join(", ")
+    backends
+        .iter()
+        .map(|b| b.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[allow(clippy::result_large_err)]

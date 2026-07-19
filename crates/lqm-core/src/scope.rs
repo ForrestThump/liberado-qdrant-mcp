@@ -179,7 +179,10 @@ mod tests {
     fn clearance_allowed_includes_lower_and_equal() {
         assert!(clearance_allowed(Some("public"), Clearance::Internal));
         assert!(clearance_allowed(Some("internal"), Clearance::Internal));
-        assert!(!clearance_allowed(Some("confidential"), Clearance::Internal));
+        assert!(!clearance_allowed(
+            Some("confidential"),
+            Clearance::Internal
+        ));
         assert!(!clearance_allowed(Some("restricted"), Clearance::Public));
         assert!(clearance_allowed(None, Clearance::Public));
         assert!(clearance_allowed(Some(""), Clearance::Public));
@@ -191,7 +194,11 @@ mod tests {
         assert_eq!(Clearance::Public.allowed_levels(), vec![Clearance::Public]);
         assert_eq!(
             Clearance::Confidential.allowed_levels(),
-            vec![Clearance::Public, Clearance::Internal, Clearance::Confidential]
+            vec![
+                Clearance::Public,
+                Clearance::Internal,
+                Clearance::Confidential
+            ]
         );
     }
 

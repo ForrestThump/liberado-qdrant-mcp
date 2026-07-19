@@ -178,7 +178,7 @@ impl LqmServer {
             last_modified,
             path_hint.as_deref(),
             scope,
-            clearance: clearance.and_then(|s| s.parse().ok()),
+            clearance.and_then(|s| s.parse().ok()),
         );
         if chunks.is_empty() {
             return Ok(serde_json::json!({
