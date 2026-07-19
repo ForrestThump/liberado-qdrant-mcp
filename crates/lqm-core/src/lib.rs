@@ -15,11 +15,12 @@ pub mod lifecycle;
 pub mod memory;
 pub mod qdrant;
 pub mod reconstruction;
+pub mod response_keys;
 pub mod scope;
 pub mod source_type;
 pub mod types;
 
-pub use api_error::{StructuredError, error_code, http_status, structured_error};
+pub use api_error::{ErrorCode, StructuredError, error_code, http_status, structured_error};
 pub use chunking::{
     ChunkKind, ChunkingStrategy, chunk_code, chunk_for_ingest, chunk_kind_for, chunk_markdown,
     chunk_text,
@@ -50,8 +51,8 @@ pub use reconstruction::{
     sort_source_chunks, source_chunk_from_payload, source_document_from_chunks,
 };
 pub use scope::{
-    CLEARANCE_LEVELS, DEFAULT_CLEARANCE, allowed_clearance_levels, clearance_allowed,
-    clearance_rank, normalize_clearance, point_in_scope, scope_matches,
+    Clearance, DEFAULT_CLEARANCE, UnknownClearance, clearance_allowed, normalize_clearance,
+    point_in_scope, scope_matches,
 };
 pub use source_type::{SourceType, UnknownSourceType};
 pub use types::{

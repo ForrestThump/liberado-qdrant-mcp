@@ -59,6 +59,12 @@ pub const MEMORY_BLEND_RECENCY_IMP_WEIGHT: f32 = 0.25;
 pub const MEMORY_BLEND_RECENCY_REC_WEIGHT: f32 = 0.15;
 /// Default half-life for recency decay (~7 days in seconds).
 pub const MEMORY_RECENCY_HALF_LIFE: f32 = 7.0 * 86400.0;
+/// Default importance for memories (0.0–1.0).
+pub const DEFAULT_MEMORY_IMPORTANCE: f32 = 0.5;
+
+// ── Memory IDs ───────────────────────────────────────────────────────
+pub const MEMORY_ID_PREFIX: &str = "mem-";
+pub const MEMORY_SOURCE_PREFIX: &str = "memory://";
 
 // ── Default source strings (canonical values owned by `SourceType`) ─
 // These re-export `SourceType::as_str()` so call sites can keep using constants
@@ -79,3 +85,15 @@ pub const DEFAULT_API_INGEST_SOURCE: &str = "api-ingest";
 
 /// Default Qdrant gRPC endpoint.
 pub const DEFAULT_QDRANT_URL: &str = "http://localhost:6334";
+
+// ── Env var names ────────────────────────────────────────────────────
+pub const ENV_EMBEDDING_BACKEND: &str = "EMBEDDING_BACKEND";
+pub const ENV_EMBEDDING_DIMENSION: &str = "EMBEDDING_DIMENSION";
+pub const ENV_EMBEDDING_OLLAMA_MODEL: &str = "EMBEDDING_OLLAMA_MODEL";
+pub const ENV_EMBEDDING_OLLAMA_URL: &str = "EMBEDDING_OLLAMA_URL";
+pub const ENV_EMBEDDING_OLLAMA_DIMENSION: &str = "EMBEDDING_OLLAMA_DIMENSION";
+pub const ENV_EMBEDDING_OPENAI_MODEL: &str = "EMBEDDING_OPENAI_MODEL";
+pub const ENV_EMBEDDING_OPENAI_URL: &str = "EMBEDDING_OPENAI_URL";
+pub const ENV_EMBEDDING_OPENAI_API_KEY: &str = "EMBEDDING_OPENAI_API_KEY";
+pub const ENV_EMBEDDING_OPENAI_DIMENSION: &str = "EMBEDDING_OPENAI_DIMENSION";
+pub const ENV_EMBEDDING_FASTEMBED_MODEL: &str = "EMBEDDING_FASTEMBED_MODEL";

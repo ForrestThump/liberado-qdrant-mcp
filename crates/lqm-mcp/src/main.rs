@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use lqm_core::RagCore;
 use lqm_core::constants;
 use lqm_core::format_relevant_context_with;
+use lqm_core::scope::Clearance;
 use lqm_core::types::{
     ContextOptions, DocumentChunk, PayloadFilter, SearchFilter, SearchOptions, make_file_result,
     resolve_collection,
@@ -114,7 +115,7 @@ impl LqmServer {
         last_modified: Option<String>,
         path_hint: Option<&str>,
         scope: Option<String>,
-        clearance: Option<String>,
+        clearance: Option<Clearance>,
     ) -> Vec<DocumentChunk> {
         self.core().expand_to_chunks(
             text,
@@ -177,7 +178,7 @@ impl LqmServer {
             last_modified,
             path_hint.as_deref(),
             scope,
-            clearance,
+            clearance.and_then(|s| s.parse().ok()),
         );
         if chunks.is_empty() {
             return Ok(serde_json::json!({
@@ -257,7 +258,16 @@ impl LqmServer {
                         tags_should,
                         tags_must_not,
                         scope,
-                        max_clearance,
+                        max_clearance: max_clearance
+                            .map(|s| {
+                                s.parse::<Clearance>().map_err(|e| {
+                                    McpError::invalid_request(format!(
+                                        "invalid max_clearance '{}': {e}",
+                                        s
+                                    ))
+                                })
+                            })
+                            .transpose()?,
                     },
                     hybrid: hybrid_on,
                     hybrid_alpha,
@@ -333,7 +343,16 @@ impl LqmServer {
                         tags_should,
                         tags_must_not,
                         scope,
-                        max_clearance,
+                        max_clearance: max_clearance
+                            .map(|s| {
+                                s.parse::<Clearance>().map_err(|e| {
+                                    McpError::invalid_request(format!(
+                                        "invalid max_clearance '{}': {e}",
+                                        s
+                                    ))
+                                })
+                            })
+                            .transpose()?,
                     },
                     hybrid: hybrid.unwrap_or(false),
                     hybrid_alpha,
@@ -981,7 +1000,13 @@ impl LqmServer {
             project,
             tags,
             scope,
-            max_clearance,
+            max_clearance: max_clearance
+                .map(|s| {
+                    s.parse::<Clearance>().map_err(|e| {
+                        McpError::invalid_request(format!("invalid max_clearance '{}': {e}", s))
+                    })
+                })
+                .transpose()?,
         };
         match self.core().delete_by_filter(&collection, &filter).await {
             Ok(deleted) => Ok(serde_json::json!({

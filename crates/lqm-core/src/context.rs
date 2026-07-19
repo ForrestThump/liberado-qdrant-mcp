@@ -1,7 +1,7 @@
 //! Agent-friendly formatting of search results as LLM-ready context.
 
 use crate::constants;
-use crate::types::{ContextOptions, SearchResult, payload_str};
+use crate::types::{ContextOptions, SearchResult, payload_schema, payload_str};
 use serde::Serialize;
 use std::collections::HashSet;
 
@@ -88,9 +88,9 @@ pub fn format_relevant_context_with(
 
     for (i, result) in working.iter().enumerate() {
         let index = i + 1;
-        let source = payload_str(&result.payload, "source");
-        let source_type = payload_str(&result.payload, "source_type");
-        let project = payload_str(&result.payload, "project");
+        let source = payload_str(&result.payload, payload_schema::SOURCE);
+        let source_type = payload_str(&result.payload, payload_schema::SOURCE_TYPE);
+        let project = payload_str(&result.payload, payload_schema::PROJECT);
 
         let passage = if max_chars > 0 && result.text.chars().count() > max_chars {
             let truncated: String = result.text.chars().take(max_chars).collect();
