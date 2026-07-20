@@ -1276,6 +1276,7 @@ mod tests {
         assert_eq!(v["id"], "fake");
     }
 
+    #[ignore = "requires live Qdrant for list_collections"]
     #[tokio::test]
     async fn router_list_collections_returns_array() {
         let state = make_test_state();
@@ -1292,6 +1293,7 @@ mod tests {
         assert!(v["collections"].is_array());
     }
 
+    #[ignore = "requires live Qdrant for get_collection_info"]
     #[tokio::test]
     async fn router_collection_info_not_found() {
         let state = make_test_state();
