@@ -107,6 +107,24 @@ pub struct CollectionInfoSummary {
     pub distance: Option<String>,
 }
 
+/// Per-collection metadata stored in the reserved `_lqm_config` Qdrant collection.
+///
+/// Every user collection created through `ensure_collection` gets a config point
+/// that records the embedder used at creation time. Validate on ingest and search
+/// so mismatched dims produce clear error messages instead of cryptic Qdrant errors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectionMeta {
+    pub name: String,
+    pub embedder_id: String,
+    pub vector_dim: u64,
+    pub model_label: Option<String>,
+    pub created_at: String,
+}
+
+/// Reserved Qdrant collection that stores `CollectionMeta` points for every
+/// user-created collection.
+pub const CONFIG_COLLECTION: &str = "_lqm_config";
+
 /// Distinct document source within a collection (agent curation).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceSummary {
