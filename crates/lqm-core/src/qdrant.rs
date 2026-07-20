@@ -15,8 +15,8 @@ use crate::scope::Clearance;
 use crate::types::{
     CONFIG_COLLECTION, ChunkConfig, CollectionInfoSummary, CollectionMeta, CollectionStats,
     DocumentChunk, EmbedderInfo, INDEX_FIELDS, IngestReport, PayloadFilter, ReingestAction,
-    SearchFilter, SearchOptions, SearchPage, SearchResult, SourceSummary, UpsertPoint,
-    payload_schema, payload_str,
+    SOURCES_COLLECTION, SearchFilter, SearchOptions, SearchPage, SearchResult, SourceSummary,
+    UpsertPoint, payload_schema, payload_str,
 };
 
 /// Fields fetched by `list_sources` — includes text for previews but skips
@@ -1125,6 +1125,13 @@ impl RagCore {
             let n = points.len();
             self.qdrant.upsert_points(&collection, points).await?;
             report.chunks += n;
+
+            // Write source status after successful upsert
+            if !source_key.is_empty() {
+                let _ = self
+                    .write_source_status(&collection, &source_key, "complete", None, n as u64)
+                    .await;
+            }
         }
 
         log::info!(
@@ -1254,6 +1261,8 @@ impl RagCore {
                     first_chunk,
                     total_chars: 0,
                     title,
+                    ingest_status: None,
+                    ingest_error: None,
                 }
             });
             entry.count += 1;
@@ -1269,6 +1278,17 @@ impl RagCore {
         }
         let mut sources: Vec<_> = map.into_values().collect();
         sources.sort_by(|a, b| a.source.cmp(&b.source));
+
+        // Enrich with source status from _lqm_sources if available
+        if let Ok(statuses) = self.read_source_statuses(collection).await {
+            for s in &mut sources {
+                if let Some((status, error)) = statuses.get(&s.source) {
+                    s.ingest_status = Some(status.clone());
+                    s.ingest_error = error.clone();
+                }
+            }
+        }
+
         Ok(sources)
     }
 
@@ -1899,6 +1919,189 @@ impl RagCore {
         }
         self.qdrant.create_collection(CONFIG_COLLECTION, 1).await?;
         Ok(())
+    }
+
+    /// Ensure the reserved `_lqm_sources` collection exists (1-dim dummy vectors).
+    async fn ensure_sources_collection(&self) -> Result<(), LqmError> {
+        if self.qdrant.collection_exists(SOURCES_COLLECTION).await? {
+            return Ok(());
+        }
+        self.qdrant.create_collection(SOURCES_COLLECTION, 1).await?;
+        Ok(())
+    }
+
+    /// Write ingest status for a source. Used by `embed_and_upsert_batch` after
+    /// successfully processing a source group.
+    #[allow(deprecated)]
+    async fn write_source_status(
+        &self,
+        collection: &str,
+        source: &str,
+        status: &str,
+        error: Option<&str>,
+        chunks: u64,
+    ) -> Result<(), LqmError> {
+        use qdrant_client::qdrant::value::Kind;
+
+        self.ensure_sources_collection().await?;
+
+        let key = format!("{collection}:{source}");
+        let mut hasher = Sha256::new();
+        hasher.update(key.as_bytes());
+        let hash = hasher.finalize();
+        let uuid = uuid::Uuid::from_bytes(hash[..16].try_into().unwrap());
+
+        let mut payload: HashMap<String, qdrant_client::qdrant::Value> = [
+            (
+                "collection".to_string(),
+                qdrant_client::qdrant::Value {
+                    kind: Some(Kind::StringValue(collection.to_string())),
+                },
+            ),
+            (
+                "source".to_string(),
+                qdrant_client::qdrant::Value {
+                    kind: Some(Kind::StringValue(source.to_string())),
+                },
+            ),
+            (
+                "status".to_string(),
+                qdrant_client::qdrant::Value {
+                    kind: Some(Kind::StringValue(status.to_string())),
+                },
+            ),
+            (
+                "chunks".to_string(),
+                qdrant_client::qdrant::Value {
+                    kind: Some(Kind::IntegerValue(chunks as i64)),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        if let Some(err) = error {
+            payload.insert(
+                "error".to_string(),
+                qdrant_client::qdrant::Value {
+                    kind: Some(Kind::StringValue(err.to_string())),
+                },
+            );
+        }
+
+        let _ = self
+            .qdrant
+            .inner
+            .upsert_points(UpsertPoints {
+                collection_name: SOURCES_COLLECTION.to_string(),
+                wait: Some(true),
+                points: vec![qdrant_client::qdrant::PointStruct {
+                    id: Some(qdrant_client::qdrant::PointId {
+                        point_id_options: Some(
+                            qdrant_client::qdrant::point_id::PointIdOptions::Uuid(uuid.to_string()),
+                        ),
+                    }),
+                    vectors: Some(Vectors {
+                        vectors_options: Some(
+                            qdrant_client::qdrant::vectors::VectorsOptions::Vector(Vector {
+                                data: vec![],
+                                indices: None,
+                                vectors_count: None,
+                                vector: Some(vector::Vector::Dense(DenseVector {
+                                    data: vec![0.0],
+                                })),
+                            }),
+                        ),
+                    }),
+                    payload,
+                }],
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| LqmError::Qdrant(e.into()))?;
+
+        Ok(())
+    }
+
+    /// Read source statuses for a given collection from `_lqm_sources`.
+    async fn read_source_statuses(
+        &self,
+        collection: &str,
+    ) -> Result<HashMap<String, (String, Option<String>)>, LqmError> {
+        use qdrant_client::qdrant::Match;
+        use qdrant_client::qdrant::value::Kind;
+
+        let filter = Filter {
+            must: vec![Condition {
+                condition_one_of: Some(qdrant_client::qdrant::condition::ConditionOneOf::Field(
+                    qdrant_client::qdrant::FieldCondition {
+                        key: "collection".to_string(),
+                        r#match: Some(Match {
+                            match_value: Some(qdrant_client::qdrant::r#match::MatchValue::Keyword(
+                                collection.to_string(),
+                            )),
+                        }),
+                        ..Default::default()
+                    },
+                )),
+            }],
+            should: vec![],
+            must_not: vec![],
+            min_should: None,
+        };
+
+        let points = self
+            .qdrant
+            .inner
+            .scroll(
+                ScrollPointsBuilder::new(SOURCES_COLLECTION)
+                    .filter(filter)
+                    .limit(1000),
+            )
+            .await
+            .map_err(|e| LqmError::Qdrant(e.into()))?
+            .result;
+
+        let mut map = HashMap::new();
+        for pt in points {
+            let source = pt
+                .payload
+                .get("source")
+                .and_then(|v| v.kind.as_ref())
+                .and_then(|k| {
+                    if let Kind::StringValue(s) = k {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                });
+            let status = pt
+                .payload
+                .get("status")
+                .and_then(|v| v.kind.as_ref())
+                .and_then(|k| {
+                    if let Kind::StringValue(s) = k {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                });
+            let error = pt
+                .payload
+                .get("error")
+                .and_then(|v| v.kind.as_ref())
+                .and_then(|k| {
+                    if let Kind::StringValue(s) = k {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                });
+            if let (Some(source), Some(status)) = (source, status) {
+                map.insert(source, (status, error));
+            }
+        }
+        Ok(map)
     }
 
     /// Read per-collection metadata from `_lqm_config`.

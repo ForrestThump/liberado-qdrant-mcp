@@ -144,7 +144,14 @@ pub struct SourceSummary {
     pub total_chars: u64,
     /// Approximate start of content (e.g., first heading or line).
     pub title: Option<String>,
+    /// Ingest status for this source: "complete", "partial", or absent if unknown.
+    pub ingest_status: Option<String>,
+    /// Last error message if `ingest_status` is "partial".
+    pub ingest_error: Option<String>,
 }
+
+/// Reserved collection that stores source-level ingest status records.
+pub const SOURCES_COLLECTION: &str = "_lqm_sources";
 
 /// Aggregated point counts grouped by payload fields in a collection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
