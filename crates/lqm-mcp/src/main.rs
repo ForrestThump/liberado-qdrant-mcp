@@ -452,13 +452,16 @@ impl LqmServer {
                     "name": name,
                     "deleted": deleted,
                 });
-                if !deleted {
-                    if let Some(suggested) = self.core().suggest_collection(&name).await {
-                        resp["suggestion"] = serde_json::Value::String(format!(
-                            "collection '{}' not found — did you mean '{}'?",
-                            name, suggested
-                        ));
-                    }
+                let suggestion = if !deleted {
+                    self.core().suggest_collection(&name).await
+                } else {
+                    None
+                };
+                if let Some(suggested) = suggestion {
+                    resp["suggestion"] = serde_json::Value::String(format!(
+                        "collection '{}' not found — did you mean '{}'?",
+                        name, suggested
+                    ));
                 }
                 Ok(resp)
             }
