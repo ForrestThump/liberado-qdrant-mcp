@@ -1114,6 +1114,45 @@ impl RagCore {
             .collect())
     }
 
+    /// Find sources similar to a given source by embedding its full text and searching.
+    ///
+    /// The source itself is excluded from results via payload filter.
+    pub async fn similar_to_source(
+        &self,
+        source: &str,
+        collection: &str,
+        limit: u64,
+        filters: Option<SearchFilter>,
+    ) -> Result<Vec<SearchResult>, LqmError> {
+        let source_doc = self.get_source(collection, source).await?;
+        if source_doc.text.trim().is_empty() {
+            return Ok(vec![]);
+        }
+
+        let embedding = self
+            .embed_batch(vec![source_doc.text])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| LqmError::Other("embedding returned empty".to_string()))?;
+
+        let mut filter = filters.unwrap_or_default();
+        // We want results that match the user's optional filters AND do NOT match the source.
+        let qdrant_filter = search_filter_to_qdrant(&filter);
+        let exclude_source = Filter {
+            must: vec![],
+            should: vec![],
+            must_not: vec![keyword_match(payload_schema::SOURCE, source.to_string())],
+            min_should: None,
+        };
+        let combined = and_filter(qdrant_filter, exclude_source);
+
+        Ok(self
+            .qdrant
+            .search(collection, embedding, limit, combined, None, Some(0))
+            .await?)
+    }
+
     /// List distinct sources in a collection with point counts and sample metadata.
     pub async fn list_sources(&self, collection: &str) -> Result<Vec<SourceSummary>, LqmError> {
         if !self.qdrant.collection_exists(collection).await? {

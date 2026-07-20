@@ -471,6 +471,32 @@ impl LqmServer {
         }
     }
 
+    /// Find sources similar to a given source by embedding its full text.
+    /// Excludes the source itself from results.
+    #[tool]
+    async fn get_similar_to_source(
+        &self,
+        source: String,
+        collection: Option<String>,
+        limit: Option<u64>,
+    ) -> McpResult<Value> {
+        let coll = collection
+            .as_deref()
+            .unwrap_or(lqm_core::types::DEFAULT_COLLECTION_NAME);
+        let l = limit.unwrap_or(10);
+        match self.core().similar_to_source(&source, coll, l, None).await {
+            Ok(hits) => Ok(serde_json::json!({
+                "status": "ok",
+                "source": source,
+                "collection": coll,
+                "hits": hits,
+            })),
+            Err(e) => {
+                Err(McpError::internal(format!("get_similar_to_source failed: {e}")))
+            }
+        }
+    }
+
     /// Inspect a collection: point counts, vector size, distance metric, status,
     /// plus the recorded embedder identity and dimension.
     #[tool]
@@ -2307,6 +2333,7 @@ const EXPECTED_OFFLINE_TOOLS: &[&str] = &[
     "delete_collection",
     "get_collection_info",
     "get_collection_stats",
+    "get_similar_to_source",
     "ingest_path",
     "ingest_url",
     "ingest_many",
