@@ -13,9 +13,10 @@ use crate::hybrid::{
 use crate::lifecycle::decide_source_reingest;
 use crate::scope::Clearance;
 use crate::types::{
-    ChunkConfig, CollectionInfoSummary, DocumentChunk, EmbedderInfo, INDEX_FIELDS, IngestReport,
-    PayloadFilter, ReingestAction, SearchFilter, SearchOptions, SearchPage, SearchResult,
-    SourceSummary, UpsertPoint, payload_schema, payload_str,
+    CONFIG_COLLECTION, ChunkConfig, CollectionInfoSummary, CollectionMeta, DocumentChunk,
+    EmbedderInfo, INDEX_FIELDS, IngestReport, PayloadFilter, ReingestAction, SearchFilter,
+    SearchOptions, SearchPage, SearchResult, SourceSummary, UpsertPoint, payload_schema,
+    payload_str,
 };
 use qdrant_client::Qdrant as QdrantGrpc;
 use qdrant_client::qdrant::{
@@ -886,7 +887,13 @@ impl RagCore {
 
         let mut report = IngestReport::default();
 
+        // Track validated collections to avoid duplicate checks per group.
+        let mut validated: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         for ((collection, source_key), group_chunks) in groups {
+            if validated.insert(collection.clone()) {
+                self.validate_collection_dim(&collection).await?;
+            }
             let new_hashes: Vec<String> = group_chunks
                 .iter()
                 .map(|c| compute_ingest_hash(&c.text))
@@ -1213,6 +1220,8 @@ impl RagCore {
             self.hybrid_keyword_backend
         );
 
+        self.validate_collection_dim(collection).await?;
+
         let query_embedding = self.embed_batch(vec![query.to_string()]).await?;
         let query_vector = query_embedding
             .into_iter()
@@ -1482,6 +1491,239 @@ impl RagCore {
             self.ensure_indexes(name).await?;
         }
 
+        // Write per-collection metadata (idempotent — overwrite so dim is always current).
+        if name != CONFIG_COLLECTION {
+            self.write_collection_meta(
+                name, dim as u64, None, // model_label set by callers, not at ensure time
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Persist embedder identity + dimension in the `_lqm_config` collection.
+    #[allow(deprecated)]
+    pub async fn write_collection_meta(
+        &self,
+        collection: &str,
+        vector_dim: u64,
+        model_label: Option<String>,
+    ) -> Result<(), LqmError> {
+        use qdrant_client::qdrant::value::Kind;
+
+        let meta = CollectionMeta {
+            name: collection.to_string(),
+            embedder_id: self.embedder.id().to_string(),
+            vector_dim,
+            model_label,
+            created_at: crate::types::unix_now_secs_str(),
+        };
+
+        let payload: HashMap<String, qdrant_client::qdrant::Value> = [
+            (
+                "collection_name".to_string(),
+                qdrant_client::qdrant::Value {
+                    kind: Some(Kind::StringValue(meta.name.clone())),
+                },
+            ),
+            (
+                "embedder_id".to_string(),
+                qdrant_client::qdrant::Value {
+                    kind: Some(Kind::StringValue(meta.embedder_id.clone())),
+                },
+            ),
+            (
+                "vector_dim".to_string(),
+                qdrant_client::qdrant::Value {
+                    kind: Some(Kind::IntegerValue(meta.vector_dim as i64)),
+                },
+            ),
+            (
+                "created_at".to_string(),
+                qdrant_client::qdrant::Value {
+                    kind: Some(Kind::StringValue(meta.created_at.clone())),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let point_id = collection.to_string();
+
+        // Fire-and-forget upsert into config collection. If the config collection
+        // doesn't exist yet, ensure it first (1-dim dummy vector).
+        self.ensure_config_collection().await?;
+
+        // Deterministic UUID from collection name for idempotent upsert.
+        let mut hasher = Sha256::new();
+        hasher.update(point_id.as_bytes());
+        let hash = hasher.finalize();
+        let uuid = uuid::Uuid::from_bytes(hash[..16].try_into().unwrap());
+
+        let _ = self
+            .qdrant
+            .inner
+            .upsert_points(UpsertPoints {
+                collection_name: CONFIG_COLLECTION.to_string(),
+                wait: Some(true),
+                points: vec![qdrant_client::qdrant::PointStruct {
+                    id: Some(qdrant_client::qdrant::PointId {
+                        point_id_options: Some(
+                            qdrant_client::qdrant::point_id::PointIdOptions::Uuid(uuid.to_string()),
+                        ),
+                    }),
+                    vectors: Some(Vectors {
+                        vectors_options: Some(
+                            qdrant_client::qdrant::vectors::VectorsOptions::Vector(Vector {
+                                data: vec![],
+                                indices: None,
+                                vectors_count: None,
+                                vector: Some(vector::Vector::Dense(DenseVector {
+                                    data: vec![0.0],
+                                })),
+                            }),
+                        ),
+                    }),
+                    payload,
+                }],
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| LqmError::Qdrant(e.into()))?;
+
+        Ok(())
+    }
+
+    /// Ensure the reserved `_lqm_config` collection exists (1-dim dummy vectors).
+    async fn ensure_config_collection(&self) -> Result<(), LqmError> {
+        if self.qdrant.collection_exists(CONFIG_COLLECTION).await? {
+            return Ok(());
+        }
+        self.qdrant.create_collection(CONFIG_COLLECTION, 1).await?;
+        Ok(())
+    }
+
+    /// Read per-collection metadata from `_lqm_config`.
+    pub async fn read_collection_meta(
+        &self,
+        collection: &str,
+    ) -> Result<Option<CollectionMeta>, LqmError> {
+        use qdrant_client::qdrant::Match;
+        use qdrant_client::qdrant::value::Kind;
+
+        // Use a keyword match filter on collection_name in _lqm_config
+        let filter = Filter {
+            must: vec![Condition {
+                condition_one_of: Some(qdrant_client::qdrant::condition::ConditionOneOf::Field(
+                    qdrant_client::qdrant::FieldCondition {
+                        key: "collection_name".to_string(),
+                        r#match: Some(Match {
+                            match_value: Some(qdrant_client::qdrant::r#match::MatchValue::Keyword(
+                                collection.to_string(),
+                            )),
+                        }),
+                        ..Default::default()
+                    },
+                )),
+            }],
+            should: vec![],
+            must_not: vec![],
+            min_should: None,
+        };
+
+        let points = self
+            .qdrant
+            .inner
+            .scroll(
+                ScrollPointsBuilder::new(CONFIG_COLLECTION)
+                    .filter(filter)
+                    .limit(1),
+            )
+            .await
+            .map_err(|e| LqmError::Qdrant(e.into()))?
+            .result;
+
+        if points.is_empty() {
+            return Ok(None);
+        }
+
+        let payload = &points[0].payload;
+        let name = payload
+            .get("collection_name")
+            .and_then(|v| v.kind.as_ref())
+            .and_then(|k| {
+                if let Kind::StringValue(s) = k {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        let embedder_id = payload
+            .get("embedder_id")
+            .and_then(|v| v.kind.as_ref())
+            .and_then(|k| {
+                if let Kind::StringValue(s) = k {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        let vector_dim = payload
+            .get("vector_dim")
+            .and_then(|v| v.kind.as_ref())
+            .and_then(|k| {
+                if let Kind::IntegerValue(i) = k {
+                    Some(*i as u64)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        let created_at = payload
+            .get("created_at")
+            .and_then(|v| v.kind.as_ref())
+            .and_then(|k| {
+                if let Kind::StringValue(s) = k {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        Ok(Some(CollectionMeta {
+            name,
+            embedder_id,
+            vector_dim,
+            model_label: None,
+            created_at,
+        }))
+    }
+
+    /// Validate that the embedder dimension matches a collection's recorded dimension.
+    ///
+    /// Returns `Ok(())` if no config exists for the collection (backward-compatible —
+    /// collections created before this feature was shipped have no recorded dim).
+    pub async fn validate_collection_dim(&self, collection: &str) -> Result<(), LqmError> {
+        if let Some(meta) = self.read_collection_meta(collection).await? {
+            let current_dim = self.embedder.dimension() as u64;
+            if meta.vector_dim != current_dim {
+                return Err(LqmError::Validation(format!(
+                    "collection '{}' was created with embedder '{}' (dim={}) but the current embedder '{}' produces dim={}",
+                    collection,
+                    meta.embedder_id,
+                    meta.vector_dim,
+                    self.embedder.id(),
+                    current_dim
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1799,6 +2041,7 @@ pub fn compute_ingest_hash(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{EmbedderConfig, create_embedder};
     use crate::embedding::FakeEmbedder;
 
     fn make_test_qdrant_client() -> QdrantClient {
@@ -2188,12 +2431,134 @@ mod tests {
 
     #[test]
     fn test_hybrid_keyword_backend_default_is_keyword_index() {
-        // Default on RagCore::new is KeywordIndex (scalable, no recreate required).
         let core = make_fake_core(1);
         assert_eq!(
             core.hybrid_keyword_backend(),
             HybridKeywordBackend::KeywordIndex
         );
+    }
+
+    // --- Collection ↔ embedder guarantees ---
+
+    #[test]
+    fn collection_meta_serialization_roundtrip() {
+        let meta = CollectionMeta {
+            name: "test-collection".into(),
+            embedder_id: "fake".into(),
+            vector_dim: 128,
+            model_label: Some("AllMiniLML6V2".into()),
+            created_at: "1700000000".into(),
+        };
+        let json = serde_json::to_value(&meta).expect("serialize");
+        let restored: CollectionMeta = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored.name, "test-collection");
+        assert_eq!(restored.embedder_id, "fake");
+        assert_eq!(restored.vector_dim, 128);
+        assert_eq!(restored.model_label.as_deref(), Some("AllMiniLML6V2"));
+    }
+
+    #[test]
+    fn config_collection_name_is_reserved() {
+        assert_eq!(CONFIG_COLLECTION, "_lqm_config");
+    }
+
+    /// Live: write collection meta, read it back, verify fields.
+    #[ignore = "requires live Qdrant at QDRANT_URL"]
+    #[tokio::test]
+    async fn live_write_and_read_collection_meta() {
+        let config = EmbedderConfig::load_or_default(None).expect("config");
+        let embedder = create_embedder(&config).expect("embedder");
+        let qdrant_url = crate::constants::DEFAULT_QDRANT_URL;
+        let qdrant = QdrantClient::new_lazy(qdrant_url).expect("qdrant client");
+        let core = RagCore::new(qdrant, embedder, Some(2));
+        let test_coll = "test_lqm_meta_coll";
+
+        // Clean up first
+        let _ = core.delete_collection(test_coll).await;
+        let _ = core.delete_collection(CONFIG_COLLECTION).await;
+
+        // Create collection — this should auto-write meta
+        core.ensure_collection(test_coll, None)
+            .await
+            .expect("ensure");
+
+        // Read meta back
+        let meta = core.read_collection_meta(test_coll).await.expect("read");
+        assert!(meta.is_some(), "meta should exist after ensure_collection");
+        let meta = meta.unwrap();
+        assert_eq!(meta.name, test_coll);
+        assert_eq!(meta.vector_dim as usize, core.embedder.dimension());
+        assert_eq!(meta.embedder_id, core.embedder.id());
+
+        // Validate dim — should pass
+        core.validate_collection_dim(test_coll)
+            .await
+            .expect("validate should pass");
+
+        // Overwrite with explicit label
+        core.write_collection_meta(test_coll, 128, Some("test-model".into()))
+            .await
+            .expect("write");
+        let meta2 = core
+            .read_collection_meta(test_coll)
+            .await
+            .expect("read")
+            .unwrap();
+        assert_eq!(meta2.model_label.as_deref(), Some("test-model"));
+
+        // Clean up
+        let _ = core.delete_collection(test_coll).await;
+        let _ = core.delete_collection(CONFIG_COLLECTION).await;
+    }
+
+    /// Live: validate_collection_dim rejects mismatched dimensions.
+    #[ignore = "requires live Qdrant at QDRANT_URL"]
+    #[tokio::test]
+    async fn live_dimension_mismatch_rejected() {
+        let config = EmbedderConfig::load_or_default(None).expect("config");
+        let embedder = create_embedder(&config).expect("embedder");
+        let qdrant_url = crate::constants::DEFAULT_QDRANT_URL;
+        let qdrant = QdrantClient::new_lazy(qdrant_url).expect("qdrant client");
+        let core = RagCore::new(qdrant, embedder, Some(2));
+        let test_coll = "test_lqm_dim_mismatch";
+
+        let _ = core.delete_collection(test_coll).await;
+        let _ = core.delete_collection(CONFIG_COLLECTION).await;
+
+        // Write meta with wrong dim
+        core.ensure_collection(test_coll, Some(128))
+            .await
+            .expect("ensure");
+        // Manually overwrite meta to claim a different dim
+        core.write_collection_meta(test_coll, 999, None)
+            .await
+            .expect("write fake dim");
+
+        let err = core.validate_collection_dim(test_coll).await;
+        assert!(
+            err.is_err(),
+            "validation should fail with mismatched dim, got: {err:?}"
+        );
+
+        // Clean up
+        let _ = core.delete_collection(test_coll).await;
+        let _ = core.delete_collection(CONFIG_COLLECTION).await;
+    }
+
+    /// Live: validate on unknown collection is backward-compatible (no error).
+    #[ignore = "requires live Qdrant at QDRANT_URL"]
+    #[tokio::test]
+    async fn live_validate_unknown_collection_ok() {
+        let config = EmbedderConfig::load_or_default(None).expect("config");
+        let embedder = create_embedder(&config).expect("embedder");
+        let qdrant_url = crate::constants::DEFAULT_QDRANT_URL;
+        let qdrant = QdrantClient::new_lazy(qdrant_url).expect("qdrant client");
+        let core = RagCore::new(qdrant, embedder, Some(2));
+
+        // A collection with no meta record should pass validation (backward compat)
+        core.validate_collection_dim("nonexistent_coll_xyz")
+            .await
+            .expect("unknown collection should pass validation");
     }
 
     // --- build_point_payload edge cases ---

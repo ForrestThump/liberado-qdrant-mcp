@@ -389,16 +389,29 @@ impl LqmServer {
     /// When `vector_dim` is omitted, the active embedder's dimension is used so later upserts
     /// match. Idempotent: existing collections are left alone and reported as `created: false`.
     #[tool]
-    async fn create_collection(&self, name: String, vector_dim: Option<u64>) -> McpResult<Value> {
+    async fn create_collection(
+        &self,
+        name: String,
+        vector_dim: Option<u64>,
+        model_label: Option<String>,
+    ) -> McpResult<Value> {
         let dim = vector_dim.map(|d| d as usize);
         match self.core().create_collection(&name, dim).await {
             Ok(created) => {
                 let resolved_dim = dim.unwrap_or_else(|| self.core().embedder.dimension());
+                // Write label if provided (overwrites the ensure-time blank write).
+                if let Some(ref label) = model_label {
+                    let _ = self
+                        .core()
+                        .write_collection_meta(&name, resolved_dim as u64, Some(label.clone()))
+                        .await;
+                }
                 Ok(serde_json::json!({
                     "status": "ok",
                     "name": name,
                     "created": created,
                     "vector_dim": resolved_dim,
+                    "embedder_id": self.core().embedder.id(),
                 }))
             }
             Err(e) => Err(McpError::internal(format!("create_collection failed: {e}"))),
@@ -418,21 +431,38 @@ impl LqmServer {
         }
     }
 
-    /// Inspect a collection: point counts, vector size, distance metric, status.
+    /// Inspect a collection: point counts, vector size, distance metric, status,
+    /// plus the recorded embedder identity and dimension.
     #[tool]
     async fn get_collection_info(&self, name: String) -> McpResult<Value> {
         match self.core().get_collection_info(&name).await {
-            Ok(Some(info)) => Ok(serde_json::json!({
-                "status": "ok",
-                "exists": true,
-                "name": info.name,
-                "points_count": info.points_count,
-                "indexed_vectors_count": info.indexed_vectors_count,
-                "segments_count": info.segments_count,
-                "collection_status": info.status,
-                "vector_size": info.vector_size,
-                "distance": info.distance,
-            })),
+            Ok(Some(info)) => {
+                let meta = self.core().read_collection_meta(&name).await.ok().flatten();
+                let mut result = serde_json::json!({
+                    "status": "ok",
+                    "exists": true,
+                    "name": info.name,
+                    "points_count": info.points_count,
+                    "indexed_vectors_count": info.indexed_vectors_count,
+                    "segments_count": info.segments_count,
+                    "collection_status": info.status,
+                    "vector_size": info.vector_size,
+                    "distance": info.distance,
+                });
+                if let Some(m) = meta {
+                    result["embedder_id"] = serde_json::Value::String(m.embedder_id);
+                    result["recorded_vector_dim"] = serde_json::Value::Number(m.vector_dim.into());
+                    if let Some(label) = m.model_label {
+                        result["model_label"] = serde_json::Value::String(label);
+                    }
+                }
+                // Always include the current embedder info so agents can compare.
+                result["current_embedder_id"] =
+                    serde_json::Value::String(self.core().embedder.id().to_string());
+                result["current_embedder_dim"] =
+                    serde_json::Value::Number(self.core().embedder.dimension().into());
+                Ok(result)
+            }
             Ok(None) => Ok(serde_json::json!({
                 "status": "ok",
                 "exists": false,
