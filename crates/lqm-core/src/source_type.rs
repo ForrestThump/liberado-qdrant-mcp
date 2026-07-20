@@ -125,4 +125,22 @@ mod tests {
         assert_eq!(SourceType::Text.as_str(), "text");
         assert_eq!(SourceType::Memory.as_str(), "memory");
     }
+
+    #[test]
+    fn unknown_source_type_error_contains_value_and_suggestions() {
+        let err = "unknown_type".parse::<SourceType>().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown_type"),
+            "error message should contain the invalid value, got: {msg}"
+        );
+        // Verify valid variants appear as suggestions
+        for variant in SourceType::ALL {
+            assert!(
+                msg.contains(variant.as_str()),
+                "error message should list available variant: {}",
+                variant.as_str()
+            );
+        }
+    }
 }

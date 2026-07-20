@@ -2195,4 +2195,647 @@ mod tests {
             HybridKeywordBackend::KeywordIndex
         );
     }
+
+    // --- build_point_payload edge cases ---
+
+    fn empty_chunk(text: &str) -> DocumentChunk {
+        DocumentChunk {
+            text: text.into(),
+            source: None,
+            source_type: None,
+            collection: None,
+            tags: None,
+            timestamp: None,
+            project: None,
+            last_modified: None,
+            chunk_index: None,
+            total_chunks: None,
+            importance: None,
+            memory_id: None,
+            scope: None,
+            clearance: None,
+        }
+    }
+
+    #[test]
+    fn build_point_payload_writes_timestamp_when_set() {
+        let chunk = DocumentChunk {
+            timestamp: Some("1700000000".into()),
+            ..empty_chunk("t")
+        };
+        let payload = build_point_payload(&chunk, 0, 1, "fake");
+        assert_eq!(payload[payload_schema::TIMESTAMP], "1700000000");
+    }
+
+    #[test]
+    fn build_point_payload_writes_last_modified_when_set() {
+        let chunk = DocumentChunk {
+            last_modified: Some("1699999999".into()),
+            ..empty_chunk("t")
+        };
+        let payload = build_point_payload(&chunk, 0, 1, "fake");
+        assert_eq!(payload[payload_schema::LAST_MODIFIED], "1699999999");
+    }
+
+    #[test]
+    fn build_point_payload_writes_scope_when_set() {
+        let chunk = DocumentChunk {
+            scope: Some("team-a".into()),
+            ..empty_chunk("t")
+        };
+        let payload = build_point_payload(&chunk, 0, 1, "fake");
+        assert_eq!(payload[payload_schema::SCOPE], "team-a");
+    }
+
+    #[test]
+    fn build_point_payload_skips_whitespace_scope() {
+        let chunk = DocumentChunk {
+            scope: Some("   ".into()),
+            ..empty_chunk("t")
+        };
+        let payload = build_point_payload(&chunk, 0, 1, "fake");
+        assert!(
+            !payload.contains_key(payload_schema::SCOPE),
+            "whitespace-only scope should not appear in payload"
+        );
+    }
+
+    #[test]
+    fn build_point_payload_writes_explicit_clearance() {
+        let chunk = DocumentChunk {
+            clearance: Some(Clearance::Confidential),
+            ..empty_chunk("t")
+        };
+        let payload = build_point_payload(&chunk, 0, 1, "fake");
+        assert_eq!(payload[payload_schema::CLEARANCE], "confidential");
+    }
+
+    #[test]
+    fn build_point_payload_defaults_clearance_to_public() {
+        let payload = build_point_payload(&empty_chunk("t"), 0, 1, "fake");
+        assert_eq!(payload[payload_schema::CLEARANCE], "public");
+    }
+
+    #[test]
+    fn build_point_payload_clamps_importance_out_of_range() {
+        let chunk = DocumentChunk {
+            importance: Some(1.5),
+            ..empty_chunk("t")
+        };
+        let payload = build_point_payload(&chunk, 0, 1, "fake");
+        assert_eq!(
+            payload[payload_schema::IMPORTANCE].as_str(),
+            Some("1"),
+            "importance > 1.0 should be clamped to 1.0"
+        );
+
+        let chunk2 = DocumentChunk {
+            importance: Some(-0.5),
+            ..empty_chunk("t")
+        };
+        let payload2 = build_point_payload(&chunk2, 0, 1, "fake");
+        assert_eq!(
+            payload2[payload_schema::IMPORTANCE].as_str(),
+            Some("0"),
+            "importance < 0.0 should be clamped to 0.0"
+        );
+    }
+
+    #[test]
+    fn build_point_payload_memory_sets_last_accessed_from_timestamp() {
+        let chunk = DocumentChunk {
+            source_type: Some(crate::memory::MEMORY_SOURCE_TYPE.into()),
+            timestamp: Some("1700000000".into()),
+            ..empty_chunk("note")
+        };
+        let payload = build_point_payload(&chunk, 0, 1, "fake");
+        assert_eq!(
+            payload[payload_schema::LAST_ACCESSED],
+            "1700000000",
+            "memory source_type with timestamp should copy to last_accessed"
+        );
+    }
+
+    #[test]
+    fn build_point_payload_non_memory_skips_last_accessed() {
+        let chunk = DocumentChunk {
+            source_type: Some("text".into()),
+            timestamp: Some("1700000000".into()),
+            ..empty_chunk("t")
+        };
+        let payload = build_point_payload(&chunk, 0, 1, "fake");
+        assert!(
+            !payload.contains_key(payload_schema::LAST_ACCESSED),
+            "non-memory source_type should not set last_accessed"
+        );
+    }
+
+    // --- make_dense_vector / make_point_vectors (protobuf construction) ---
+
+    #[test]
+    #[allow(deprecated)]
+    fn make_dense_vector_wraps_data_in_dense_variant() {
+        let data = vec![0.1, 0.2, 0.3];
+        let v = QdrantClient::make_dense_vector(data.clone());
+        assert!(v.data.is_empty(), "deprecated data field should be empty");
+        let inner = v.vector.expect("vector variant should be set");
+        match inner {
+            vector::Vector::Dense(dv) => assert_eq!(dv.data, data),
+            _ => panic!("expected Dense variant"),
+        }
+    }
+
+    #[test]
+    fn make_point_vectors_dense_only_produces_bare_vector() {
+        let dense = vec![1.0, 2.0];
+        let v = QdrantClient::make_point_vectors(dense.clone(), None);
+        let opts = v.vectors_options.expect("vectors_options should be set");
+        match opts {
+            qdrant_client::qdrant::vectors::VectorsOptions::Vector(vec) => {
+                let inner = vec.vector.expect("inner vector should be set");
+                match inner {
+                    vector::Vector::Dense(dv) => assert_eq!(dv.data, dense),
+                    _ => panic!("expected Dense"),
+                }
+            }
+            _ => panic!("expected bare Vector when no sparse"),
+        }
+    }
+
+    #[test]
+    fn make_point_vectors_with_sparse_produces_named_vectors() {
+        let dense = vec![0.5];
+        let sparse = Some((vec![0u32, 1], vec![0.8f32, 0.3]));
+        let v = QdrantClient::make_point_vectors(dense.clone(), sparse);
+        let opts = v.vectors_options.expect("vectors_options should be set");
+        match opts {
+            qdrant_client::qdrant::vectors::VectorsOptions::Vectors(named) => {
+                assert_eq!(named.vectors.len(), 2, "dense + sparse = 2 named vectors");
+                assert!(named.vectors.contains_key(""), "dense uses empty name");
+                assert!(
+                    named
+                        .vectors
+                        .contains_key(crate::constants::SPARSE_VECTOR_NAME),
+                    "sparse uses SPARSE_VECTOR_NAME"
+                );
+            }
+            _ => panic!("expected NamedVectors when sparse is present"),
+        }
+    }
+
+    #[test]
+    fn make_point_vectors_empty_sparse_falls_back_to_dense() {
+        let dense = vec![0.5];
+        let sparse = Some((vec![], vec![]));
+        let v = QdrantClient::make_point_vectors(dense.clone(), sparse);
+        let opts = v.vectors_options.expect("vectors_options should be set");
+        match opts {
+            qdrant_client::qdrant::vectors::VectorsOptions::Vector(_) => {}
+            _ => panic!("empty sparse should fall back to bare Vector"),
+        }
+    }
+
+    #[test]
+    fn make_point_vectors_mismatched_sparse_len_falls_back_to_dense() {
+        let dense = vec![0.5];
+        let sparse = Some((vec![0u32, 1, 2], vec![0.8f32]));
+        let v = QdrantClient::make_point_vectors(dense.clone(), sparse);
+        let opts = v.vectors_options.expect("vectors_options should be set");
+        match opts {
+            qdrant_client::qdrant::vectors::VectorsOptions::Vector(_) => {}
+            _ => panic!("mismatched sparse lengths should fall back to bare Vector"),
+        }
+    }
+
+    // --- qdrant_value_to_json / qdrant_payload_to_json ---
+
+    #[test]
+    fn qdrant_value_string_to_json() {
+        let v = qdrant_client::qdrant::Value {
+            kind: Some(qdrant_client::qdrant::value::Kind::StringValue(
+                "hello".into(),
+            )),
+        };
+        assert_eq!(
+            qdrant_value_to_json(&v),
+            serde_json::Value::String("hello".into())
+        );
+    }
+
+    #[test]
+    fn qdrant_value_list_to_json() {
+        let v = qdrant_client::qdrant::Value {
+            kind: Some(qdrant_client::qdrant::value::Kind::ListValue(
+                qdrant_client::qdrant::ListValue {
+                    values: vec![
+                        qdrant_client::qdrant::Value {
+                            kind: Some(qdrant_client::qdrant::value::Kind::StringValue("a".into())),
+                        },
+                        qdrant_client::qdrant::Value {
+                            kind: Some(qdrant_client::qdrant::value::Kind::StringValue("b".into())),
+                        },
+                    ],
+                },
+            )),
+        };
+        assert_eq!(qdrant_value_to_json(&v), serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn qdrant_value_list_fallback_for_non_string() {
+        let v = qdrant_client::qdrant::Value {
+            kind: Some(qdrant_client::qdrant::value::Kind::ListValue(
+                qdrant_client::qdrant::ListValue {
+                    values: vec![qdrant_client::qdrant::Value {
+                        kind: Some(qdrant_client::qdrant::value::Kind::IntegerValue(42)),
+                    }],
+                },
+            )),
+        };
+        let result = qdrant_value_to_json(&v);
+        let arr = result.as_array().expect("outer should be Array");
+        assert_eq!(arr.len(), 1);
+        assert!(
+            arr[0].is_string(),
+            "non-string item in list should fall back to Debug string"
+        );
+    }
+
+    #[test]
+    fn qdrant_value_empty_kind_falls_back_to_debug() {
+        let v = qdrant_client::qdrant::Value { kind: None };
+        let result = qdrant_value_to_json(&v);
+        assert!(
+            result.is_string(),
+            "empty kind should fall back to Debug string"
+        );
+    }
+
+    #[test]
+    fn qdrant_payload_to_json_empty() {
+        let map: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+        let result = qdrant_payload_to_json(map.iter());
+        assert_eq!(result.as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn qdrant_payload_to_json_single_key() {
+        let mut map = HashMap::new();
+        map.insert(
+            "key".into(),
+            qdrant_client::qdrant::Value {
+                kind: Some(qdrant_client::qdrant::value::Kind::StringValue(
+                    "val".into(),
+                )),
+            },
+        );
+        let result = qdrant_payload_to_json(map.iter());
+        assert_eq!(result["key"], "val");
+    }
+
+    #[test]
+    fn qdrant_payload_to_json_multiple_keys() {
+        let mut map = HashMap::new();
+        map.insert(
+            "a".into(),
+            qdrant_client::qdrant::Value {
+                kind: Some(qdrant_client::qdrant::value::Kind::StringValue("1".into())),
+            },
+        );
+        map.insert(
+            "b".into(),
+            qdrant_client::qdrant::Value {
+                kind: Some(qdrant_client::qdrant::value::Kind::StringValue("2".into())),
+            },
+        );
+        let result = qdrant_payload_to_json(map.iter());
+        assert_eq!(result["a"], "1");
+        assert_eq!(result["b"], "2");
+    }
+
+    // --- scored_point_to_search_result ---
+
+    #[test]
+    fn scored_point_to_search_result_extracts_text_and_score() {
+        let mut payload = HashMap::new();
+        payload.insert(
+            "text".into(),
+            qdrant_client::qdrant::Value {
+                kind: Some(qdrant_client::qdrant::value::Kind::StringValue(
+                    "hello world".into(),
+                )),
+            },
+        );
+        let sp = ScoredPoint {
+            id: None,
+            payload,
+            score: 0.95,
+            version: 0,
+            vectors: None,
+            shard_key: None,
+            order_value: None,
+        };
+        let result = scored_point_to_search_result(&sp);
+        assert_eq!(result.text, "hello world");
+        assert!((result.score - 0.95).abs() < 0.001);
+    }
+
+    #[test]
+    fn scored_point_to_search_result_missing_text_defaults_empty() {
+        let sp = ScoredPoint {
+            id: None,
+            payload: HashMap::new(),
+            score: 0.5,
+            version: 0,
+            vectors: None,
+            shard_key: None,
+            order_value: None,
+        };
+        let result = scored_point_to_search_result(&sp);
+        assert_eq!(result.text, "");
+        assert!((result.score - 0.5).abs() < 0.001);
+        assert!(result.payload.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn scored_point_to_search_result_text_not_a_string() {
+        let mut payload = HashMap::new();
+        payload.insert(
+            "text".into(),
+            qdrant_client::qdrant::Value {
+                kind: Some(qdrant_client::qdrant::value::Kind::IntegerValue(123)),
+            },
+        );
+        let sp = ScoredPoint {
+            id: None,
+            payload,
+            score: 0.3,
+            version: 0,
+            vectors: None,
+            shard_key: None,
+            order_value: None,
+        };
+        let result = scored_point_to_search_result(&sp);
+        assert_eq!(
+            result.text, "",
+            "non-string text field should default to empty"
+        );
+    }
+
+    // --- payload_filter_to_qdrant ---
+
+    #[test]
+    fn payload_filter_empty_returns_none() {
+        assert!(payload_filter_to_qdrant(&PayloadFilter::default()).is_none());
+    }
+
+    #[test]
+    fn payload_filter_is_empty_returns_none() {
+        // PayloadFilter::default() has all None fields → is_empty() returns true → None.
+        assert!(payload_filter_to_qdrant(&PayloadFilter::default()).is_none());
+    }
+
+    #[test]
+    fn payload_filter_source_only() {
+        let f = PayloadFilter {
+            source: Some("doc.md".into()),
+            ..Default::default()
+        };
+        let qf = payload_filter_to_qdrant(&f).expect("filter");
+        assert_eq!(qf.must.len(), 1, "only source → 1 must condition");
+    }
+
+    #[test]
+    fn payload_filter_multi_tags() {
+        let f = PayloadFilter {
+            tags: Some(vec!["a".into(), "b".into(), "c".into()]),
+            ..Default::default()
+        };
+        let qf = payload_filter_to_qdrant(&f).expect("filter");
+        assert_eq!(qf.must.len(), 3, "3 tags → 3 must conditions (AND)");
+    }
+
+    #[test]
+    fn payload_filter_full() {
+        let f = PayloadFilter {
+            source: Some("s".into()),
+            source_type: Some("text".into()),
+            project: Some("p".into()),
+            tags: Some(vec!["t1".into(), "t2".into()]),
+            scope: Some("team-a".into()),
+            max_clearance: Some(Clearance::Internal),
+        };
+        let qf = payload_filter_to_qdrant(&f).expect("filter");
+        // source + source_type + project + 2 tags + scope + clearance
+        assert_eq!(qf.must.len(), 1 + 1 + 1 + 2 + 1 + 1);
+    }
+
+    #[test]
+    fn payload_filter_with_empty_string_scope_skipped() {
+        let f = PayloadFilter {
+            scope: Some("".into()),
+            source: Some("s".into()),
+            ..Default::default()
+        };
+        let qf = payload_filter_to_qdrant(&f).expect("filter");
+        assert_eq!(
+            qf.must.len(),
+            1,
+            "empty scope should be skipped, only source remains"
+        );
+    }
+
+    // --- and_filter ---
+
+    #[test]
+    fn and_filter_none_first_returns_second() {
+        let b = Filter {
+            must: vec![keyword_match("k", "v".into())],
+            should: vec![],
+            must_not: vec![],
+            min_should: None,
+        };
+        let result = and_filter(None, b.clone());
+        assert_eq!(result.unwrap().must.len(), 1);
+    }
+
+    #[test]
+    fn and_filter_combines_must_should_must_not() {
+        let a = Some(Filter {
+            must: vec![keyword_match("a", "1".into())],
+            should: vec![keyword_match("s", "x".into())],
+            must_not: vec![keyword_match("n", "y".into())],
+            min_should: None,
+        });
+        let b = Filter {
+            must: vec![keyword_match("b", "2".into())],
+            should: vec![],
+            must_not: vec![keyword_match("n2", "z".into())],
+            min_should: Some(qdrant_client::qdrant::MinShould {
+                conditions: vec![],
+                min_count: 2,
+            }),
+        };
+        let result = and_filter(a, b).expect("combined filter");
+        assert_eq!(result.must.len(), 2);
+        assert_eq!(result.should.len(), 1);
+        assert_eq!(result.must_not.len(), 2);
+    }
+
+    #[test]
+    fn and_filter_preserves_min_should_from_first() {
+        let a = Some(Filter {
+            must: vec![],
+            should: vec![],
+            must_not: vec![],
+            min_should: Some(qdrant_client::qdrant::MinShould {
+                conditions: vec![],
+                min_count: 3,
+            }),
+        });
+        let b = Filter {
+            must: vec![],
+            should: vec![],
+            must_not: vec![],
+            min_should: Some(qdrant_client::qdrant::MinShould {
+                conditions: vec![],
+                min_count: 1,
+            }),
+        };
+        let result = and_filter(a, b).expect("combined filter");
+        assert_eq!(
+            result.min_should.map(|m| m.min_count),
+            Some(3),
+            "first filter's min_should wins"
+        );
+    }
+
+    #[test]
+    fn and_filter_uses_second_min_should_when_first_none() {
+        let a = Some(Filter {
+            must: vec![],
+            should: vec![],
+            must_not: vec![],
+            min_should: None,
+        });
+        let b = Filter {
+            must: vec![],
+            should: vec![],
+            must_not: vec![],
+            min_should: Some(qdrant_client::qdrant::MinShould {
+                conditions: vec![],
+                min_count: 5,
+            }),
+        };
+        let result = and_filter(a, b).expect("combined filter");
+        assert_eq!(
+            result.min_should.map(|m| m.min_count),
+            Some(5),
+            "second filter's min_should used when first is None"
+        );
+    }
+
+    // --- clearance_max_condition / push_scope_and_clearance ---
+
+    #[test]
+    fn clearance_max_condition_public_allows_one_level() {
+        let cond =
+            clearance_max_condition(Clearance::Public).expect("public should produce condition");
+        if let Some(qdrant_client::qdrant::condition::ConditionOneOf::Filter(inner)) =
+            &cond.condition_one_of
+        {
+            assert_eq!(inner.should.len(), 1, "Public admits only Public");
+        } else {
+            panic!("expected nested filter condition");
+        }
+    }
+
+    #[test]
+    fn clearance_max_condition_internal_allows_two_levels() {
+        let cond = clearance_max_condition(Clearance::Internal)
+            .expect("internal should produce condition");
+        if let Some(qdrant_client::qdrant::condition::ConditionOneOf::Filter(inner)) =
+            &cond.condition_one_of
+        {
+            assert_eq!(inner.should.len(), 2, "Internal admits Public + Internal");
+        } else {
+            panic!("expected nested filter condition");
+        }
+    }
+
+    #[test]
+    fn clearance_max_condition_confidential_allows_three_levels() {
+        let cond = clearance_max_condition(Clearance::Confidential)
+            .expect("confidential should produce condition");
+        if let Some(qdrant_client::qdrant::condition::ConditionOneOf::Filter(inner)) =
+            &cond.condition_one_of
+        {
+            assert_eq!(
+                inner.should.len(),
+                3,
+                "Confidential admits Public + Internal + Confidential"
+            );
+        } else {
+            panic!("expected nested filter condition");
+        }
+    }
+
+    #[test]
+    fn clearance_max_condition_restricted_allows_four_levels() {
+        let cond = clearance_max_condition(Clearance::Restricted)
+            .expect("restricted should produce condition");
+        if let Some(qdrant_client::qdrant::condition::ConditionOneOf::Filter(inner)) =
+            &cond.condition_one_of
+        {
+            assert_eq!(inner.should.len(), 4, "Restricted admits all four levels");
+        } else {
+            panic!("expected nested filter condition");
+        }
+    }
+
+    #[test]
+    fn push_scope_and_clearance_both_present() {
+        let mut must = Vec::new();
+        push_scope_and_clearance(&mut must, Some("team-a"), Some(Clearance::Internal));
+        assert_eq!(must.len(), 2, "scope + clearance → 2 conditions");
+    }
+
+    #[test]
+    fn push_scope_and_clearance_only_scope() {
+        let mut must = Vec::new();
+        push_scope_and_clearance(&mut must, Some("team-a"), None);
+        assert_eq!(must.len(), 1, "only scope → 1 condition");
+    }
+
+    #[test]
+    fn push_scope_and_clearance_only_clearance() {
+        let mut must = Vec::new();
+        push_scope_and_clearance(&mut must, None, Some(Clearance::Confidential));
+        assert_eq!(must.len(), 1, "only clearance → 1 condition");
+    }
+
+    #[test]
+    fn push_scope_and_clearance_neither() {
+        let mut must = Vec::new();
+        push_scope_and_clearance(&mut must, None, None);
+        assert_eq!(must.len(), 0, "neither → 0 conditions");
+    }
+
+    #[test]
+    fn push_scope_and_clearance_empty_string_scope_skipped() {
+        let mut must = Vec::new();
+        push_scope_and_clearance(&mut must, Some(""), Some(Clearance::Public));
+        assert_eq!(must.len(), 1, "empty scope skipped, only clearance");
+    }
+
+    #[test]
+    fn push_scope_and_clearance_whitespace_scope_skipped() {
+        let mut must = Vec::new();
+        push_scope_and_clearance(&mut must, Some("   "), Some(Clearance::Restricted));
+        assert_eq!(
+            must.len(),
+            1,
+            "whitespace-only scope skipped, only clearance"
+        );
+    }
 }

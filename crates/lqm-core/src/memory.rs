@@ -351,6 +351,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_importance_accepts_integer() {
+        // Integer JSON values hit as_i64(), not as_f64().
+        assert!(
+            (parse_importance_value(&json!(1)).unwrap() - 1.0).abs() < 1e-5,
+            "integer 1 should parse as 1.0"
+        );
+        assert!(
+            (parse_importance_value(&json!(0)).unwrap() - 0.0).abs() < 1e-5,
+            "integer 0 should parse as 0.0"
+        );
+        // Out-of-range integer gets clamped
+        assert!(
+            (parse_importance_value(&json!(5)).unwrap() - 1.0).abs() < 1e-5,
+            "integer > 1 should be clamped to 1.0"
+        );
+    }
+
+    #[test]
     fn blend_higher_importance_wins_without_recency() {
         let low = blend_memory_score(0.9, 0.1, None, 1000, false, 86400.0);
         let high = blend_memory_score(0.9, 0.9, None, 1000, false, 86400.0);
@@ -503,5 +521,11 @@ mod tests {
         }];
         let hits = rank_memory_hits(&results, 1_700_000_000, false, 86_400.0);
         assert!((hits[0].importance.unwrap() - 0.85).abs() < 1e-4);
+    }
+
+    #[test]
+    fn rank_memory_hits_empty_returns_empty() {
+        let hits = rank_memory_hits(&[], 1_700_000_000, true, 86_400.0);
+        assert!(hits.is_empty());
     }
 }
