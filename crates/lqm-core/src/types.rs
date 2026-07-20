@@ -132,12 +132,18 @@ pub struct CollectionMeta {
 pub const CONFIG_COLLECTION: &str = "_lqm_config";
 
 /// Distinct document source within a collection (agent curation).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SourceSummary {
     pub source: String,
     pub count: u64,
     pub source_type: Option<String>,
     pub last_modified: Option<String>,
+    /// First-chunk preview (first ~160 chars of the first chunk's text).
+    pub first_chunk: Option<String>,
+    /// Sum of character lengths across all chunks for this source.
+    pub total_chars: u64,
+    /// Approximate start of content (e.g., first heading or line).
+    pub title: Option<String>,
 }
 
 /// Aggregated point counts grouped by payload fields in a collection.
