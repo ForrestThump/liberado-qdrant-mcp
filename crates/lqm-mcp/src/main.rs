@@ -446,11 +446,25 @@ impl LqmServer {
     #[tool]
     async fn delete_collection(&self, name: String) -> McpResult<Value> {
         match self.core().delete_collection(&name).await {
-            Ok(deleted) => Ok(serde_json::json!({
-                "status": "ok",
-                "name": name,
-                "deleted": deleted,
-            })),
+            Ok(deleted) => {
+                let mut resp = serde_json::json!({
+                    "status": "ok",
+                    "name": name,
+                    "deleted": deleted,
+                });
+                let suggestion = if !deleted {
+                    self.core().suggest_collection(&name).await
+                } else {
+                    None
+                };
+                if let Some(suggested) = suggestion {
+                    resp["suggestion"] = serde_json::Value::String(format!(
+                        "collection '{}' not found — did you mean '{}'?",
+                        name, suggested
+                    ));
+                }
+                Ok(resp)
+            }
             Err(e) => Err(McpError::internal(format!("delete_collection failed: {e}"))),
         }
     }
@@ -538,11 +552,20 @@ impl LqmServer {
                     serde_json::Value::Number(self.core().embedder.dimension().into());
                 Ok(result)
             }
-            Ok(None) => Ok(serde_json::json!({
-                "status": "ok",
-                "exists": false,
-                "name": name,
-            })),
+            Ok(None) => {
+                let mut resp = serde_json::json!({
+                    "status": "ok",
+                    "exists": false,
+                    "name": name,
+                });
+                if let Some(suggested) = self.core().suggest_collection(&name).await {
+                    resp["suggestion"] = serde_json::Value::String(format!(
+                        "collection '{}' not found — did you mean '{}'?",
+                        name, suggested
+                    ));
+                }
+                Ok(resp)
+            }
             Err(e) => Err(McpError::internal(format!(
                 "get_collection_info failed: {e}"
             ))),

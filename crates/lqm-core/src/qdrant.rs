@@ -1701,6 +1701,31 @@ impl RagCore {
         Ok(self.qdrant.list_collections().await?)
     }
 
+    /// Find the Levenshtein-closest collection name to the given needle.
+    ///
+    /// Returns `None` if no collections exist or the closest match exceeds half the
+    /// needle length (avoids spurious suggestions for very short or unrelated names).
+    pub async fn suggest_collection(&self, needle: &str) -> Option<String> {
+        let needle_lower = needle.to_ascii_lowercase();
+        let candidates = match self.list_collections().await {
+            Ok(names) => names,
+            Err(_) => return None,
+        };
+        if candidates.is_empty() {
+            return None;
+        }
+        let threshold = (needle.len() / 2).max(1);
+        candidates
+            .iter()
+            .map(|name| {
+                let dist = levenshtein(&needle_lower, &name.to_ascii_lowercase());
+                (name.clone(), dist)
+            })
+            .filter(|(_, d)| *d <= threshold)
+            .min_by_key(|(_, d)| *d)
+            .map(|(name, _)| name)
+    }
+
     /// Ensure a collection exists. When `vector_dim` is `None`, uses the active embedder dimension.
     ///
     /// New collections get a sparse vector schema when
@@ -2021,12 +2046,15 @@ impl RagCore {
             let current_dim = self.embedder.dimension() as u64;
             if meta.vector_dim != current_dim {
                 return Err(LqmError::Validation(format!(
-                    "collection '{}' was created with embedder '{}' (dim={}) but the current embedder '{}' produces dim={}",
+                    "collection '{}' was created with embedder '{}' (dim={}) but the current embedder '{}' produces dim={}. \
+                     To match, either recreate the collection with `vector_dim={}` or switch back to embedder '{}'.",
                     collection,
                     meta.embedder_id,
                     meta.vector_dim,
                     self.embedder.id(),
-                    current_dim
+                    current_dim,
+                    meta.vector_dim,
+                    meta.embedder_id,
                 )));
             }
         }
@@ -2389,6 +2417,28 @@ pub fn compute_ingest_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Levenshtein (edit) distance between two strings.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let (m, n) = (a_chars.len(), b_chars.len());
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
 }
 
 #[cfg(test)]
@@ -3731,6 +3781,68 @@ mod tests {
         );
 
         let _ = core.delete_collection(test_coll).await;
+        let _ = core.delete_collection(CONFIG_COLLECTION).await;
+    }
+
+    // ── Levenshtein distance + collection suggestions ──
+
+    #[test]
+    fn levenshtein_same_string_is_zero() {
+        assert_eq!(levenshtein("hello", "hello"), 0);
+    }
+
+    #[test]
+    fn levenshtein_one_substitution() {
+        assert_eq!(levenshtein("hello", "hallo"), 1);
+    }
+
+    #[test]
+    fn levenshtein_one_deletion() {
+        assert_eq!(levenshtein("hello", "hell"), 1);
+    }
+
+    #[test]
+    fn levenshtein_completely_different() {
+        assert_eq!(levenshtein("abc", "xyz"), 3);
+    }
+
+    #[test]
+    fn levenshtein_case_sensitive() {
+        // levenshtein is case-sensitive; our suggestion wrapper lowercases both sides.
+        assert_ne!(levenshtein("Hello", "hello"), 0);
+    }
+
+    /// Live: suggest_collection returns closest match within threshold.
+    #[ignore = "requires live Qdrant at QDRANT_URL"]
+    #[tokio::test]
+    async fn live_suggest_collection_finds_closest() {
+        let config = EmbedderConfig::load_or_default(None).expect("config");
+        let embedder = create_embedder(&config).expect("embedder");
+        let qdrant_url = crate::constants::DEFAULT_QDRANT_URL;
+        let qdrant = QdrantClient::new_lazy(qdrant_url).expect("qdrant client");
+        let core = RagCore::new(qdrant, embedder, Some(2));
+
+        let _ = core.delete_collection("my_homelab_notes").await;
+        let _ = core.delete_collection("my_homelab_config").await;
+        let _ = core.delete_collection(CONFIG_COLLECTION).await;
+
+        core.ensure_collection("my_homelab_notes", None)
+            .await
+            .expect("ok");
+        core.ensure_collection("my_homelab_config", None)
+            .await
+            .expect("ok");
+
+        // Typo: "homelab" -> "homelab" is 0 chars off, should match "my_homelab_notes"
+        let suggestion = core.suggest_collection("my_homelvb_notes").await;
+        assert_eq!(suggestion.as_deref(), Some("my_homelab_notes"));
+
+        // Unrelated name should not match (distance too high)
+        let none = core.suggest_collection("completely_different").await;
+        assert!(none.is_none(), "unrelated name should return None");
+
+        let _ = core.delete_collection("my_homelab_notes").await;
+        let _ = core.delete_collection("my_homelab_config").await;
         let _ = core.delete_collection(CONFIG_COLLECTION).await;
     }
 }
