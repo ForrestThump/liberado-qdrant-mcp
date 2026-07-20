@@ -3,7 +3,7 @@
 //! All agent/HTTP/CLI surfaces should go through `RagCore` so chunking, payload
 //! schema, and re-ingest policy stay consistent.
 
-use crate::chunking::{ChunkingStrategy, chunk_text};
+use crate::chunking::{ChunkingStrategy, chunk_for_ingest, chunk_text};
 use crate::embedding::Embedder;
 use crate::error::LqmError;
 use crate::hybrid::{
@@ -793,6 +793,24 @@ impl RagCore {
         &self.chunk_config
     }
 
+    /// Read per-collection chunk config from `_lqm_config`, falling back to global defaults.
+    pub async fn chunk_config_for(&self, collection: &str) -> ChunkConfig {
+        if let Ok(Some(meta)) = self.read_collection_meta(collection).await {
+            ChunkConfig {
+                chunk_size: meta
+                    .chunk_size
+                    .map(|s| s as usize)
+                    .unwrap_or(self.chunk_config.chunk_size),
+                overlap: meta
+                    .chunk_overlap
+                    .map(|o| o as usize)
+                    .unwrap_or(self.chunk_config.overlap),
+            }
+        } else {
+            self.chunk_config.clone()
+        }
+    }
+
     /// Whether payload indexes are auto-created on `ensure_collection`.
     pub fn auto_index(&self) -> bool {
         self.auto_index
@@ -1494,7 +1512,12 @@ impl RagCore {
         // Write per-collection metadata (idempotent — overwrite so dim is always current).
         if name != CONFIG_COLLECTION {
             self.write_collection_meta(
-                name, dim as u64, None, // model_label set by callers, not at ensure time
+                name,
+                dim as u64,
+                None, // model_label set by callers
+                None, // chunk_size (global default)
+                None, // chunk_overlap
+                None, // chunk_kind
             )
             .await?;
         }
@@ -1509,6 +1532,9 @@ impl RagCore {
         collection: &str,
         vector_dim: u64,
         model_label: Option<String>,
+        chunk_size: Option<u64>,
+        chunk_overlap: Option<u64>,
+        chunk_kind: Option<String>,
     ) -> Result<(), LqmError> {
         use qdrant_client::qdrant::value::Kind;
 
@@ -1518,9 +1544,12 @@ impl RagCore {
             vector_dim,
             model_label,
             created_at: crate::types::unix_now_secs_str(),
+            chunk_size,
+            chunk_overlap,
+            chunk_kind,
         };
 
-        let payload: HashMap<String, qdrant_client::qdrant::Value> = [
+        let mut payload = HashMap::from([
             (
                 "collection_name".to_string(),
                 qdrant_client::qdrant::Value {
@@ -1545,9 +1574,32 @@ impl RagCore {
                     kind: Some(Kind::StringValue(meta.created_at.clone())),
                 },
             ),
-        ]
-        .into_iter()
-        .collect();
+        ]);
+
+        if let Some(cs) = meta.chunk_size {
+            payload.insert(
+                "chunk_size".to_string(),
+                qdrant_client::qdrant::Value {
+                    kind: Some(Kind::IntegerValue(cs as i64)),
+                },
+            );
+        }
+        if let Some(co) = meta.chunk_overlap {
+            payload.insert(
+                "chunk_overlap".to_string(),
+                qdrant_client::qdrant::Value {
+                    kind: Some(Kind::IntegerValue(co as i64)),
+                },
+            );
+        }
+        if let Some(ref ck) = meta.chunk_kind {
+            payload.insert(
+                "chunk_kind".to_string(),
+                qdrant_client::qdrant::Value {
+                    kind: Some(Kind::StringValue(ck.clone())),
+                },
+            );
+        }
 
         let point_id = collection.to_string();
 
@@ -1697,12 +1749,46 @@ impl RagCore {
             })
             .unwrap_or_default();
 
+        let chunk_size = payload
+            .get("chunk_size")
+            .and_then(|v| v.kind.as_ref())
+            .and_then(|k| {
+                if let Kind::IntegerValue(i) = k {
+                    Some(*i as u64)
+                } else {
+                    None
+                }
+            });
+        let chunk_overlap = payload
+            .get("chunk_overlap")
+            .and_then(|v| v.kind.as_ref())
+            .and_then(|k| {
+                if let Kind::IntegerValue(i) = k {
+                    Some(*i as u64)
+                } else {
+                    None
+                }
+            });
+        let chunk_kind = payload
+            .get("chunk_kind")
+            .and_then(|v| v.kind.as_ref())
+            .and_then(|k| {
+                if let Kind::StringValue(s) = k {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            });
+
         Ok(Some(CollectionMeta {
             name,
             embedder_id,
             vector_dim,
             model_label: None,
             created_at,
+            chunk_size,
+            chunk_overlap,
+            chunk_kind,
         }))
     }
 
@@ -1786,7 +1872,17 @@ impl RagCore {
     ) -> Vec<String> {
         let strategy =
             ChunkingStrategy::new(self.chunk_config.chunk_size, self.chunk_config.overlap);
-        crate::chunking::chunk_for_ingest(text, source_type, path_hint, &strategy)
+        chunk_for_ingest(text, source_type, path_hint, &strategy)
+    }
+
+    fn chunk_for_ingest_with_strategy(
+        &self,
+        text: &str,
+        source_type: Option<&str>,
+        path_hint: Option<&str>,
+        strategy: &ChunkingStrategy,
+    ) -> Vec<String> {
+        chunk_for_ingest(text, source_type, path_hint, strategy)
     }
 
     /// Expand a source document into structure-aware `DocumentChunk`s for upsert.
@@ -1806,10 +1902,37 @@ impl RagCore {
         scope: Option<String>,
         clearance: Option<Clearance>,
     ) -> Vec<DocumentChunk> {
-        let pieces = self.chunk_for_ingest(
+        self.expand_to_chunks_with_config(
+            text, source, source_type, collection, tags, project, last_modified,
+            path_hint, scope, clearance, None,
+        )
+    }
+
+    /// Same as `expand_to_chunks` but accepts an optional per-collection `ChunkConfig` override.
+    pub fn expand_to_chunks_with_config(
+        &self,
+        text: &str,
+        source: Option<String>,
+        source_type: Option<String>,
+        collection: String,
+        tags: Option<Vec<String>>,
+        project: Option<String>,
+        last_modified: Option<String>,
+        path_hint: Option<&str>,
+        scope: Option<String>,
+        clearance: Option<Clearance>,
+        chunk_config: Option<ChunkConfig>,
+    ) -> Vec<DocumentChunk> {
+        let strategy = if let Some(ref cc) = chunk_config {
+            ChunkingStrategy::new(cc.chunk_size, cc.overlap)
+        } else {
+            ChunkingStrategy::new(self.chunk_config.chunk_size, self.chunk_config.overlap)
+        };
+        let pieces = self.chunk_for_ingest_with_strategy(
             text,
             source_type.as_deref(),
             path_hint.or(source.as_deref()),
+            &strategy,
         );
         let total = pieces.len();
         pieces
@@ -2448,6 +2571,9 @@ mod tests {
             vector_dim: 128,
             model_label: Some("AllMiniLML6V2".into()),
             created_at: "1700000000".into(),
+            chunk_size: Some(256),
+            chunk_overlap: Some(50),
+            chunk_kind: Some("code".into()),
         };
         let json = serde_json::to_value(&meta).expect("serialize");
         let restored: CollectionMeta = serde_json::from_value(json).expect("deserialize");
@@ -2455,11 +2581,48 @@ mod tests {
         assert_eq!(restored.embedder_id, "fake");
         assert_eq!(restored.vector_dim, 128);
         assert_eq!(restored.model_label.as_deref(), Some("AllMiniLML6V2"));
+        assert_eq!(restored.chunk_size, Some(256));
+        assert_eq!(restored.chunk_overlap, Some(50));
+        assert_eq!(restored.chunk_kind.as_deref(), Some("code"));
     }
 
     #[test]
     fn config_collection_name_is_reserved() {
         assert_eq!(CONFIG_COLLECTION, "_lqm_config");
+    }
+
+    #[test]
+    fn expand_to_chunks_uses_custom_config_when_provided() {
+        let core = make_fake_core(1);
+        let small_config = ChunkConfig {
+            chunk_size: 30,
+            overlap: 5,
+        };
+        let text = "this is a very long sentence that should be split into multiple chunks";
+        let chunks = core.expand_to_chunks_with_config(
+            text, None, Some("text".to_string()), "c".into(), None, None, None, None, None, None,
+            Some(small_config),
+        );
+        assert!(
+            chunks.len() >= 2,
+            "small chunk_size=30 should split long text, got {} chunks",
+            chunks.len()
+        );
+        for c in &chunks {
+            assert!(c.text.len() <= 36, "chunk '{}' exceeds 30+overlap", c.text);
+        }
+    }
+
+    #[test]
+    fn expand_to_chunks_uses_global_default_without_config() {
+        let core = make_fake_core(1);
+        let text = "a short sentence";
+        let chunks = core.expand_to_chunks(
+            text, Some("short".to_string()), Some("text".to_string()), "c".into(), None, None, None, None, None, None,
+        );
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].source.as_deref(), Some("short"));
+        assert_eq!(chunks[0].collection.as_deref(), Some("c"));
     }
 
     /// Live: write collection meta, read it back, verify fields.
@@ -2496,7 +2659,7 @@ mod tests {
             .expect("validate should pass");
 
         // Overwrite with explicit label
-        core.write_collection_meta(test_coll, 128, Some("test-model".into()))
+        core.write_collection_meta(test_coll, 128, Some("test-model".into()), None, None, None)
             .await
             .expect("write");
         let meta2 = core
@@ -2530,7 +2693,7 @@ mod tests {
             .await
             .expect("ensure");
         // Manually overwrite meta to claim a different dim
-        core.write_collection_meta(test_coll, 999, None)
+        core.write_collection_meta(test_coll, 999, None, None, None, None)
             .await
             .expect("write fake dim");
 

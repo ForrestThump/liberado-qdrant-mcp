@@ -119,6 +119,12 @@ pub struct CollectionMeta {
     pub vector_dim: u64,
     pub model_label: Option<String>,
     pub created_at: String,
+    /// Per-collection chunk size override (None → global default).
+    pub chunk_size: Option<u64>,
+    /// Per-collection chunk overlap override (None → global default).
+    pub chunk_overlap: Option<u64>,
+    /// Per-collection chunk kind override (None → infer from source_type/extension).
+    pub chunk_kind: Option<String>,
 }
 
 /// Reserved Qdrant collection that stores `CollectionMeta` points for every
