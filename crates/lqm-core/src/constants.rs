@@ -26,6 +26,8 @@ pub const DEFAULT_CONTEXT_LIMIT: u64 = 8;
 pub const HAS_MORE_EXTRA: u64 = 1;
 pub const SCROLL_PAGE_SIZE: u32 = 256;
 pub const KEYWORD_SCROLL_PAGE: u32 = 128;
+/// Max chunks embedded in one batch call (prevents OOM on large ingests).
+pub const MAX_EMBED_BATCH_CHUNKS: usize = 256;
 
 // ── Hybrid retrieval ────────────────────────────────────────────────
 /// Phrase / substring bonus added to keyword score when full query appears.

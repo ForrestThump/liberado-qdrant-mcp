@@ -1034,7 +1034,21 @@ impl RagCore {
             }
 
             let texts: Vec<String> = group_chunks.iter().map(|c| c.text.clone()).collect();
-            let embeddings = self.embed_batch(texts).await?;
+            // Batch embedding to cap memory pressure on large ingests.
+            let embeddings: Vec<Vec<f32>> = if texts.len() > crate::constants::MAX_EMBED_BATCH_CHUNKS {
+                log::info!(
+                    "large batch ({} chunks), splitting into {} sub-batches",
+                    texts.len(),
+                    texts.len().div_ceil(crate::constants::MAX_EMBED_BATCH_CHUNKS)
+                );
+                let mut all = Vec::with_capacity(texts.len());
+                for sub_batch in texts.chunks(crate::constants::MAX_EMBED_BATCH_CHUNKS) {
+                    all.extend(self.embed_batch(sub_batch.to_vec()).await?);
+                }
+                all
+            } else {
+                self.embed_batch(texts).await?
+            };
             let mut points = Vec::with_capacity(group_chunks.len());
             let group_len = group_chunks.len();
             let embedding_model = self
