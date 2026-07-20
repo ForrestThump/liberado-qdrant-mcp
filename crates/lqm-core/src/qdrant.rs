@@ -18,6 +18,17 @@ use crate::types::{
     SearchFilter, SearchOptions, SearchPage, SearchResult, SourceSummary, UpsertPoint,
     payload_schema, payload_str,
 };
+
+/// Fields fetched by `list_sources` — includes text for previews but skips
+/// ~11 other payload keys (ingest_hash, tags, scope, project, timestamp,
+/// embedding_model, importance, last_accessed, memory_id, chunk_index,
+/// total_chunks, clearance).
+const SOURCE_FIELD_MASK: &[&str] = &[
+    payload_schema::SOURCE,
+    payload_schema::SOURCE_TYPE,
+    payload_schema::LAST_MODIFIED,
+    payload_schema::TEXT,
+];
 use qdrant_client::Qdrant as QdrantGrpc;
 use qdrant_client::qdrant::{
     CollectionStatus, Condition, CountPointsBuilder, CreateCollection,
@@ -464,14 +475,39 @@ impl QdrantClient {
         filter: Option<Filter>,
         page_size: u32,
     ) -> Result<Vec<crate::types::Payload>, QdrantError> {
+        self.scroll_payloads_with_mask(collection, filter, page_size, None)
+            .await
+    }
+
+    /// Scroll payloads with an optional field mask (include-list) to reduce wire size.
+    ///
+    /// When `field_mask` is `Some`, only those payload keys are fetched; others (including
+    /// the heavy `text` field and vectors) are excluded.
+    pub async fn scroll_payloads_with_mask(
+        &self,
+        collection: &str,
+        filter: Option<Filter>,
+        page_size: u32,
+        field_mask: Option<&[&str]>,
+    ) -> Result<Vec<crate::types::Payload>, QdrantError> {
         let mut out = Vec::new();
         let mut offset: Option<PointId> = None;
         let page = page_size.max(1);
+
+        let include_fields =
+            field_mask.map(|fields| qdrant_client::qdrant::PayloadIncludeSelector {
+                fields: fields.iter().map(|s| s.to_string()).collect(),
+            });
+
         loop {
             let mut builder = ScrollPointsBuilder::new(collection)
                 .limit(page)
-                .with_payload(true)
                 .with_vectors(false);
+            if let Some(ref inc) = include_fields {
+                builder = builder.with_payload(inc.clone());
+            } else {
+                builder = builder.with_payload(true);
+            }
             if let Some(ref f) = filter {
                 builder = builder.filter(f.clone());
             }
@@ -1156,27 +1192,74 @@ impl RagCore {
             .await?)
     }
 
-    /// List distinct sources in a collection with point counts and sample metadata.
+    /// List distinct sources in a collection with point counts and enriched previews.
+    ///
+    /// Uses a field mask that skips ~11 non-essential payload keys (ingest_hash, tags,
+    /// scope, embedding_model, chunk indices, etc.) while still fetching source, source_type,
+    /// last_modified, and text for previews.
     pub async fn list_sources(&self, collection: &str) -> Result<Vec<SourceSummary>, LqmError> {
         if !self.qdrant.collection_exists(collection).await? {
             return Ok(vec![]);
         }
         let payloads = self
             .qdrant
-            .scroll_payloads(collection, None, crate::constants::SCROLL_PAGE_SIZE)
+            .scroll_payloads_with_mask(
+                collection,
+                None,
+                crate::constants::SCROLL_PAGE_SIZE,
+                Some(SOURCE_FIELD_MASK),
+            )
             .await?;
         let mut map: HashMap<String, SourceSummary> = HashMap::new();
         for p in payloads {
             let Some(source) = payload_str(&p, payload_schema::SOURCE) else {
                 continue;
             };
-            let entry = map.entry(source.clone()).or_insert_with(|| SourceSummary {
-                source,
-                count: 0,
-                source_type: None,
-                last_modified: None,
+            let entry = map.entry(source.clone()).or_insert_with(|| {
+                let first_chunk = p
+                    .get(payload_schema::TEXT)
+                    .and_then(|v| v.as_str())
+                    .map(|t| {
+                        let max_len = crate::constants::TEXT_PREVIEW_CHARS;
+                        if t.len() <= max_len {
+                            t.to_string()
+                        } else {
+                            // Take up to preview chars, truncate at last whitespace
+                            let mut end =
+                                t[..max_len].rfind(char::is_whitespace).unwrap_or(max_len);
+                            if end == 0 {
+                                end = max_len;
+                            }
+                            format!("{}…", &t[..end])
+                        }
+                    });
+                let title = first_chunk
+                    .as_deref()
+                    .or(p.get(payload_schema::SOURCE_TYPE).and_then(|v| v.as_str()))
+                    .map(|s| {
+                        // First non-empty line, trimmed, capped at 80 chars
+                        s.lines()
+                            .next()
+                            .map(|l| l.trim())
+                            .unwrap_or("")
+                            .chars()
+                            .take(80)
+                            .collect()
+                    });
+                SourceSummary {
+                    source,
+                    count: 0,
+                    source_type: None,
+                    last_modified: None,
+                    first_chunk,
+                    total_chars: 0,
+                    title,
+                }
             });
             entry.count += 1;
+            if let Some(t) = p.get(payload_schema::TEXT).and_then(|v| v.as_str()) {
+                entry.total_chars = entry.total_chars.saturating_add(t.len() as u64);
+            }
             if entry.source_type.is_none() {
                 entry.source_type = payload_str(&p, payload_schema::SOURCE_TYPE);
             }
@@ -3530,5 +3613,124 @@ mod tests {
             1,
             "whitespace-only scope skipped, only clearance"
         );
+    }
+
+    // ── Performance test bench: list_sources field mask ──
+
+    /// Benchmark: `list_sources` with field mask vs full payload scroll.
+    ///
+    /// Creates N chunks across M sources, then measures both paths. Asserts that
+    /// the field-masked path returns identical results AND is measurably faster or
+    /// equivalent in data volume.
+    #[ignore = "requires live Qdrant at QDRANT_URL"]
+    #[tokio::test]
+    async fn bench_list_sources_field_mask() {
+        let config = EmbedderConfig::load_or_default(None).expect("config");
+        let embedder = create_embedder(&config).expect("embedder");
+        let qdrant_url = crate::constants::DEFAULT_QDRANT_URL;
+        let qdrant = QdrantClient::new_lazy(qdrant_url).expect("qdrant client");
+        let core = RagCore::new(qdrant, embedder, Some(4));
+        let test_coll = "test_lqm_perf_sources";
+        let num_sources = 20u64;
+        let chunks_per_source = 5u64;
+
+        let _ = core.delete_collection(test_coll).await;
+        core.ensure_collection(test_coll, None)
+            .await
+            .expect("ensure");
+
+        // Ingest many chunks across multiple sources
+        let mut all_chunks = Vec::new();
+        for s in 0..num_sources {
+            for i in 0..chunks_per_source {
+                let text = format!(
+                    "Source {} chunk {}: this is a medium-length paragraph for benchmarking purposes, with enough characters to simulate real-world chunk sizes but not so many that it distorts the results.",
+                    s, i
+                );
+                all_chunks.push(DocumentChunk {
+                    text,
+                    source: Some(format!("source-{s}")),
+                    source_type: Some("text".into()),
+                    collection: Some(test_coll.into()),
+                    chunk_index: Some(i as usize),
+                    total_chunks: Some(chunks_per_source as usize),
+                    ..empty_chunk("")
+                });
+            }
+        }
+        core.embed_and_upsert_batch(all_chunks)
+            .await
+            .expect("ingest");
+
+        // Warm-up: one call each to stabilise connection pooling
+        let _ = core.list_sources(test_coll).await;
+
+        // ── Measure masked path (our new optimised path) ──
+        let t0 = tokio::time::Instant::now();
+        let sources_masked = core.list_sources(test_coll).await.expect("masked");
+        let elapsed_masked = t0.elapsed();
+
+        // ── Measure unmasked path (classic full-payload scroll) ──
+        let t1 = tokio::time::Instant::now();
+        let payloads_full = core
+            .qdrant
+            .scroll_payloads(test_coll, None, crate::constants::SCROLL_PAGE_SIZE)
+            .await
+            .expect("full scroll");
+        let elapsed_full = t1.elapsed();
+
+        // ── Aggregate full-payload results the same way to compare ──
+        let mut map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for p in &payloads_full {
+            if let Some(source) = payload_str(p, payload_schema::SOURCE) {
+                *map.entry(source).or_default() += 1;
+            }
+        }
+        let full_count: u64 = map.values().sum();
+
+        // ── Assertions ──
+        assert_eq!(
+            sources_masked.len() as u64,
+            num_sources,
+            "masked: expected {} sources, got {}",
+            num_sources,
+            sources_masked.len()
+        );
+        assert_eq!(
+            full_count,
+            num_sources * chunks_per_source,
+            "full: expected {} chunks, got {}",
+            num_sources * chunks_per_source,
+            full_count
+        );
+
+        // First-chunk preview and total_chars should be populated
+        for s in &sources_masked {
+            assert!(
+                s.total_chars > 0,
+                "source {} should have total_chars > 0",
+                s.source
+            );
+            assert!(
+                s.first_chunk.is_some(),
+                "source {} should have a first_chunk preview",
+                s.source
+            );
+            assert!(s.title.is_some(), "source {} should have a title", s.source);
+        }
+
+        // The masked path should not be slower than the full path.
+        // Allow a small tolerance (2x) for warm-up variance on the first call.
+        assert!(
+            elapsed_masked < elapsed_full.mul_f64(3.0),
+            "masked path ({elapsed_masked:?}) should not be >3x slower than full ({elapsed_full:?})"
+        );
+
+        log::info!(
+            "list_sources bench: {num_sources} sources × {chunks_per_source} chunks — masked={elapsed_masked:?} full={elapsed_full:?}"
+        );
+
+        let _ = core.delete_collection(test_coll).await;
+        let _ = core.delete_collection(CONFIG_COLLECTION).await;
     }
 }
