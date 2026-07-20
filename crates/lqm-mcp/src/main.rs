@@ -2,6 +2,8 @@ use clap::{Parser, Subcommand};
 use lqm_core::RagCore;
 use lqm_core::constants;
 use lqm_core::format_relevant_context_with;
+use lqm_core::response_keys;
+use lqm_core::scope::{Clearance, parse_optional_clearance};
 use lqm_core::types::{
     ContextOptions, DocumentChunk, PayloadFilter, SearchFilter, SearchOptions, make_file_result,
     resolve_collection,
@@ -10,6 +12,11 @@ use lqm_core::{DEFAULT_MEMORY_COLLECTION, MemoryNote};
 use serde_json::Value;
 use std::sync::Arc;
 use turbomcp::prelude::*;
+
+/// Parse optional clearance from MCP tool args; blank → None, invalid → invalid_request.
+fn parse_tool_clearance(value: Option<&str>) -> McpResult<Option<Clearance>> {
+    parse_optional_clearance(value).map_err(|e| McpError::invalid_request(e.to_string()))
+}
 
 #[derive(Parser)]
 #[command(name = "lqm-mcp", about = "liberado-qdrant-mcp server")]
@@ -114,7 +121,7 @@ impl LqmServer {
         last_modified: Option<String>,
         path_hint: Option<&str>,
         scope: Option<String>,
-        clearance: Option<String>,
+        clearance: Option<Clearance>,
     ) -> Vec<DocumentChunk> {
         self.core().expand_to_chunks(
             text,
@@ -177,38 +184,38 @@ impl LqmServer {
             last_modified,
             path_hint.as_deref(),
             scope,
-            clearance,
+            parse_tool_clearance(clearance.as_deref())?,
         );
         if chunks.is_empty() {
             return Ok(serde_json::json!({
-                "status": "ok",
-                "collection": collection,
-                "inserted": 0,
-                "skipped": 0,
-                "replaced": 0,
-                "chunks": 0,
-                "files": [{
-                    "path": path_hint,
+                (response_keys::STATUS): response_keys::OK,
+                (response_keys::COLLECTION): collection,
+                (response_keys::INSERTED): 0,
+                (response_keys::SKIPPED): 0,
+                (response_keys::REPLACED): 0,
+                (response_keys::CHUNKS): 0,
+                (response_keys::FILES): [{
+                    (response_keys::PATH): path_hint,
                     "ok": true,
-                    "error": null,
-                    "chunks": 0,
+                    (response_keys::ERROR): null,
+                    (response_keys::CHUNKS): 0,
                 }],
             }));
         }
         let file_chunks = chunks.len();
         match core.embed_and_upsert_batch(chunks).await {
             Ok(report) => Ok(serde_json::json!({
-                "status": "ok",
-                "collection": collection,
-                "inserted": report.inserted,
-                "skipped": report.skipped,
-                "replaced": report.replaced,
-                "chunks": report.chunks,
-                "files": [{
-                    "path": path_hint,
+                (response_keys::STATUS): response_keys::OK,
+                (response_keys::COLLECTION): collection,
+                (response_keys::INSERTED): report.inserted,
+                (response_keys::SKIPPED): report.skipped,
+                (response_keys::REPLACED): report.replaced,
+                (response_keys::CHUNKS): report.chunks,
+                (response_keys::FILES): [{
+                    (response_keys::PATH): path_hint,
                     "ok": true,
-                    "error": null,
-                    "chunks": file_chunks,
+                    (response_keys::ERROR): null,
+                    (response_keys::CHUNKS): file_chunks,
                 }],
             })),
             Err(e) => Err(McpError::internal(format!("ingest failed: {e}"))),
@@ -257,7 +264,7 @@ impl LqmServer {
                         tags_should,
                         tags_must_not,
                         scope,
-                        max_clearance,
+                        max_clearance: parse_tool_clearance(max_clearance.as_deref())?,
                     },
                     hybrid: hybrid_on,
                     hybrid_alpha,
@@ -278,11 +285,11 @@ impl LqmServer {
             })
             .collect();
         Ok(serde_json::json!({
-            "results": json_results,
-            "offset": page.offset,
-            "limit": page.limit,
-            "has_more": page.has_more,
-            "next_offset": page.next_offset,
+            (response_keys::RESULTS): json_results,
+            (response_keys::OFFSET): page.offset,
+            (response_keys::LIMIT): page.limit,
+            (response_keys::HAS_MORE): page.has_more,
+            (response_keys::NEXT_OFFSET): page.next_offset,
             "hybrid": hybrid_on,
         }))
     }
@@ -333,7 +340,7 @@ impl LqmServer {
                         tags_should,
                         tags_must_not,
                         scope,
-                        max_clearance,
+                        max_clearance: parse_tool_clearance(max_clearance.as_deref())?,
                     },
                     hybrid: hybrid.unwrap_or(false),
                     hybrid_alpha,
@@ -981,12 +988,12 @@ impl LqmServer {
             project,
             tags,
             scope,
-            max_clearance,
+            max_clearance: parse_tool_clearance(max_clearance.as_deref())?,
         };
         match self.core().delete_by_filter(&collection, &filter).await {
             Ok(deleted) => Ok(serde_json::json!({
-                "status": "ok",
-                "collection": collection,
+                (response_keys::STATUS): response_keys::OK,
+                (response_keys::COLLECTION): collection,
                 "deleted": deleted,
                 "filter": filter,
             })),

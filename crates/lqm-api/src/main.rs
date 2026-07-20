@@ -7,8 +7,11 @@ use axum::{
     routing::{get, post},
 };
 use clap::Parser;
+use lqm_core::ErrorCode;
 use lqm_core::constants;
 use lqm_core::format_relevant_context_with;
+use lqm_core::response_keys;
+use lqm_core::scope::{Clearance, parse_optional_clearance};
 use lqm_core::structured_error;
 use lqm_core::types::{
     ContextOptions, DocumentChunk, PayloadFilter, SearchFilter, SearchOptions, make_file_result,
@@ -152,7 +155,7 @@ fn map_lqm_err(e: lqm_core::error::LqmError) -> (StatusCode, Json<ErrorResponse>
 }
 
 fn map_msg(
-    code: &str,
+    code: ErrorCode,
     message: impl Into<String>,
     status: StatusCode,
 ) -> (StatusCode, Json<ErrorResponse>) {
@@ -165,6 +168,19 @@ fn map_msg(
             error: message,
         }),
     )
+}
+
+/// Parse optional clearance/max_clearance from HTTP body; blank → None, invalid → 400.
+fn parse_body_clearance(
+    value: Option<&str>,
+) -> Result<Option<Clearance>, (StatusCode, Json<ErrorResponse>)> {
+    parse_optional_clearance(value).map_err(|e| {
+        map_msg(
+            ErrorCode::ValidationError,
+            e.to_string(),
+            StatusCode::BAD_REQUEST,
+        )
+    })
 }
 
 /// Expand text into structure-aware chunks with stable payload indices.
@@ -180,7 +196,7 @@ fn expand_chunks(
     last_modified: Option<String>,
     path_hint: Option<&str>,
     scope: Option<String>,
-    clearance: Option<String>,
+    clearance: Option<Clearance>,
 ) -> Vec<DocumentChunk> {
     core.expand_to_chunks(
         text,
@@ -261,7 +277,7 @@ async fn search(
                     tags_should: body.tags_should,
                     tags_must_not: body.tags_must_not,
                     scope: body.scope,
-                    max_clearance: body.max_clearance,
+                    max_clearance: parse_body_clearance(body.max_clearance.as_deref())?,
                 },
                 hybrid: hybrid_on,
                 hybrid_alpha: body.hybrid_alpha,
@@ -271,11 +287,11 @@ async fn search(
         .map_err(map_lqm_err)?;
 
     Ok(Json(serde_json::json!({
-        "results": page.results,
-        "offset": page.offset,
-        "limit": page.limit,
-        "has_more": page.has_more,
-        "next_offset": page.next_offset,
+        (response_keys::RESULTS): page.results,
+        (response_keys::OFFSET): page.offset,
+        (response_keys::LIMIT): page.limit,
+        (response_keys::HAS_MORE): page.has_more,
+        (response_keys::NEXT_OFFSET): page.next_offset,
         "hybrid": hybrid_on,
     })))
 }
@@ -302,7 +318,7 @@ async fn get_relevant_context(
                     tags_should: body.tags_should,
                     tags_must_not: body.tags_must_not,
                     scope: body.scope,
-                    max_clearance: body.max_clearance,
+                    max_clearance: parse_body_clearance(body.max_clearance.as_deref())?,
                 },
                 hybrid: body.hybrid.unwrap_or(false),
                 hybrid_alpha: body.hybrid_alpha,
@@ -323,17 +339,17 @@ async fn get_relevant_context(
     );
 
     Ok(Json(serde_json::json!({
-        "status": "ok",
+        (response_keys::STATUS): response_keys::OK,
         "query": body.query,
-        "collection": coll,
+        (response_keys::COLLECTION): coll,
         "passage_count": formatted.passage_count,
         "truncated_by_budget": formatted.truncated_by_budget,
-        "offset": page.offset,
-        "limit": page.limit,
-        "has_more": page.has_more,
-        "next_offset": page.next_offset,
+        (response_keys::OFFSET): page.offset,
+        (response_keys::LIMIT): page.limit,
+        (response_keys::HAS_MORE): page.has_more,
+        (response_keys::NEXT_OFFSET): page.next_offset,
         "context": formatted.context,
-        "sources": formatted.sources,
+        (response_keys::SOURCES): formatted.sources,
     })))
 }
 
@@ -361,7 +377,7 @@ async fn ingest(
         body.last_modified.map(|ts| ts.to_string()),
         None,
         body.scope,
-        body.clearance,
+        parse_body_clearance(body.clearance.as_deref())?,
     );
     let ts = timestamp_now();
     for c in &mut chunks {
@@ -552,7 +568,7 @@ async fn delete_by_filter(
         project: body.project,
         tags: body.tags,
         scope: body.scope,
-        max_clearance: body.max_clearance,
+        max_clearance: parse_body_clearance(body.max_clearance.as_deref())?,
     };
     let deleted = state
         .core
@@ -560,8 +576,8 @@ async fn delete_by_filter(
         .await
         .map_err(map_lqm_err)?;
     Ok(Json(serde_json::json!({
-        "status": "ok",
-        "collection": name,
+        (response_keys::STATUS): response_keys::OK,
+        (response_keys::COLLECTION): name,
         "deleted": deleted,
         "filter": filter,
     })))
@@ -608,7 +624,7 @@ async fn ingest_path(
 
     let metadata = std::fs::metadata(&body.path).map_err(|e| {
         map_msg(
-            "io_error",
+            ErrorCode::IoError,
             format!("cannot access path: {e}"),
             StatusCode::BAD_REQUEST,
         )
@@ -619,7 +635,7 @@ async fn ingest_path(
         for entry in walkdir::WalkDir::new(&body.path) {
             let entry = entry.map_err(|e| {
                 map_msg(
-                    "io_error",
+                    ErrorCode::IoError,
                     format!("walk error: {e}"),
                     StatusCode::BAD_REQUEST,
                 )
@@ -632,7 +648,7 @@ async fn ingest_path(
         paths.push(std::path::PathBuf::from(&body.path));
     } else {
         return Err(map_msg(
-            "validation_error",
+            ErrorCode::ValidationError,
             format!("path is not a file or directory: {}", body.path),
             StatusCode::BAD_REQUEST,
         ));
@@ -713,9 +729,13 @@ async fn ingest_url(
         .await
         .map_err(map_lqm_err)?;
 
-    let fetched = lqm_ingest::fetch_url(&body.url, None)
-        .await
-        .map_err(|e| map_msg("fetch_error", e.to_string(), StatusCode::BAD_REQUEST))?;
+    let fetched = lqm_ingest::fetch_url(&body.url, None).await.map_err(|e| {
+        map_msg(
+            ErrorCode::FetchError,
+            e.to_string(),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
     let source = body.source.unwrap_or_else(|| fetched.url.clone());
     let source_type = body.source_type.unwrap_or(fetched.source_type);
@@ -735,7 +755,7 @@ async fn ingest_url(
     let file_chunks = chunks.len();
     if chunks.is_empty() {
         return Err(map_msg(
-            "validation_error",
+            ErrorCode::ValidationError,
             format!("no chunks for {}", body.url),
             StatusCode::BAD_REQUEST,
         ));
@@ -781,6 +801,7 @@ async fn ingest_many(
 
     let mut all_chunks = Vec::new();
     let mut file_results = Vec::new();
+    let clearance = parse_body_clearance(body.clearance.as_deref())?;
 
     if let Some(texts) = body.texts {
         for (i, text) in texts.into_iter().enumerate() {
@@ -796,7 +817,7 @@ async fn ingest_many(
                 None,
                 None,
                 body.scope.clone(),
-                body.clearance.clone(),
+                clearance,
             );
             let n = pieces.len();
             all_chunks.extend(pieces);
@@ -823,7 +844,7 @@ async fn ingest_many(
                             doc.last_modified,
                             Some(&path),
                             body.scope.clone(),
-                            body.clearance.clone(),
+                            clearance,
                         );
                         n += pieces.len();
                         all_chunks.extend(pieces);
@@ -853,7 +874,7 @@ async fn ingest_many(
                         None,
                         Some(&url),
                         body.scope.clone(),
-                        body.clearance.clone(),
+                        clearance,
                     );
                     let n = pieces.len();
                     all_chunks.extend(pieces);
@@ -989,18 +1010,24 @@ async fn require_bearer(
     req: axum::extract::Request,
     next: Next,
 ) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
+    const BEARER_PREFIX: &str = "Bearer ";
     if let Some(ref expected) = state.api_token {
         let auth = headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         let token = auth
-            .strip_prefix("Bearer ")
-            .or_else(|| auth.strip_prefix("bearer "))
+            .strip_prefix(BEARER_PREFIX)
+            .or_else(|| {
+                let lower = auth.to_ascii_lowercase();
+                lower
+                    .strip_prefix("bearer ")
+                    .map(|_| &auth[BEARER_PREFIX.len()..])
+            })
             .unwrap_or("");
         if token != expected.as_str() {
             return Err(map_msg(
-                "unauthorized",
+                ErrorCode::Unauthorized,
                 "missing or invalid Authorization bearer token",
                 StatusCode::UNAUTHORIZED,
             ));

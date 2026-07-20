@@ -9,51 +9,137 @@
 //!
 //! This is **payload isolation for agents**, not multi-user auth.
 
-/// Ordered clearance levels (index = rank). Lower rank = less sensitive.
-pub const CLEARANCE_LEVELS: &[&str] = &["public", "internal", "confidential", "restricted"];
+use serde::{Deserialize, Serialize};
 
-/// Default clearance when ingest omits the field.
-pub const DEFAULT_CLEARANCE: &str = "public";
-
-/// Rank of a clearance level (`0` = public). Unknown levels return `None`.
-pub fn clearance_rank(level: &str) -> Option<u8> {
-    let n = level.trim().to_ascii_lowercase();
-    CLEARANCE_LEVELS
-        .iter()
-        .position(|l| *l == n)
-        .map(|i| i as u8)
+/// Ordered clearance levels. Lower variant rank = less sensitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+#[serde(into = "String", try_from = "String")]
+pub enum Clearance {
+    Public = 0,
+    Internal = 1,
+    Confidential = 2,
+    Restricted = 3,
 }
 
-/// Normalize a clearance string to a known level name, or `None` if invalid.
-pub fn normalize_clearance(level: &str) -> Option<&'static str> {
-    let rank = clearance_rank(level)?;
-    Some(CLEARANCE_LEVELS[rank as usize])
+impl Clearance {
+    /// All clearance levels in ascending sensitivity order.
+    pub const ALL: &[Clearance] = &[
+        Clearance::Public,
+        Clearance::Internal,
+        Clearance::Confidential,
+        Clearance::Restricted,
+    ];
+
+    /// Canonical string for Qdrant payload storage.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Clearance::Public => "public",
+            Clearance::Internal => "internal",
+            Clearance::Confidential => "confidential",
+            Clearance::Restricted => "restricted",
+        }
+    }
+
+    /// Levels at or below `self` (inclusive).
+    pub fn allowed_levels(&self) -> Vec<Clearance> {
+        let max_rank = *self as u8;
+        Clearance::ALL[..=max_rank as usize].to_vec()
+    }
+
+    /// Whether this clearance is allowed under a `max_clearance` ceiling.
+    pub fn allowed_under(&self, max: Clearance) -> bool {
+        *self <= max
+    }
+}
+
+/// Default clearance when ingest omits the field.
+pub const DEFAULT_CLEARANCE: Clearance = Clearance::Public;
+
+impl std::fmt::Display for Clearance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<Clearance> for String {
+    fn from(c: Clearance) -> Self {
+        c.as_str().to_string()
+    }
+}
+
+impl std::str::FromStr for Clearance {
+    type Err = UnknownClearance;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "public" => Ok(Clearance::Public),
+            "internal" => Ok(Clearance::Internal),
+            "confidential" => Ok(Clearance::Confidential),
+            "restricted" => Ok(Clearance::Restricted),
+            other => Err(UnknownClearance(other.to_string())),
+        }
+    }
+}
+
+impl TryFrom<String> for Clearance {
+    type Error = UnknownClearance;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UnknownClearance(pub String);
+
+impl std::fmt::Display for UnknownClearance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unknown clearance '{}'; expected one of: {}",
+            self.0,
+            Clearance::ALL
+                .iter()
+                .map(|c| c.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+impl std::error::Error for UnknownClearance {}
+
+/// Normalize a clearance string to a known `Clearance`, or `None` if invalid.
+pub fn normalize_clearance(level: &str) -> Option<Clearance> {
+    level.parse().ok()
+}
+
+/// Parse an optional clearance from an MCP/HTTP boundary string.
+///
+/// - `None` or blank/whitespace → `Ok(None)` (absent; no filter / default ingest)
+/// - known level (case-insensitive, trimmed) → `Ok(Some(Clearance))`
+/// - any other non-blank token → `Err(UnknownClearance)` (fail closed; never admit-all)
+pub fn parse_optional_clearance(
+    value: Option<&str>,
+) -> Result<Option<Clearance>, UnknownClearance> {
+    match value {
+        None => Ok(None),
+        Some(s) if s.trim().is_empty() => Ok(None),
+        Some(s) => s.parse().map(Some),
+    }
 }
 
 /// Whether a point's clearance is allowed under `max_clearance`.
 ///
 /// Missing / empty point clearance is treated as [`DEFAULT_CLEARANCE`].
-/// Unknown `max_clearance` rejects everything (strict).
-pub fn clearance_allowed(point_clearance: Option<&str>, max_clearance: &str) -> bool {
-    let Some(max_rank) = clearance_rank(max_clearance) else {
-        return false;
-    };
-    let point_rank = point_clearance
+pub fn clearance_allowed(point_clearance: Option<&str>, max_clearance: Clearance) -> bool {
+    let point = point_clearance
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .and_then(clearance_rank)
-        .unwrap_or_else(|| clearance_rank(DEFAULT_CLEARANCE).unwrap_or(0));
-    point_rank <= max_rank
-}
-
-/// Levels permitted when filtering with `max_clearance` (inclusive).
-///
-/// Empty if `max_clearance` is unknown.
-pub fn allowed_clearance_levels(max_clearance: &str) -> Vec<&'static str> {
-    let Some(max_rank) = clearance_rank(max_clearance) else {
-        return Vec::new();
-    };
-    CLEARANCE_LEVELS[..=max_rank as usize].to_vec()
+        .and_then(|s| s.parse::<Clearance>().ok())
+        .unwrap_or(DEFAULT_CLEARANCE);
+    point.allowed_under(max_clearance)
 }
 
 /// Exact scope match when a constraint is set.
@@ -76,18 +162,17 @@ pub fn point_in_scope(
     point_scope: Option<&str>,
     point_clearance: Option<&str>,
     required_scope: Option<&str>,
-    max_clearance: Option<&str>,
+    max_clearance: Option<Clearance>,
 ) -> bool {
     if let Some(scope) = required_scope
         && !scope_matches(point_scope, scope)
     {
         return false;
     }
-    if let Some(max) = max_clearance {
-        let max = max.trim();
-        if !max.is_empty() && !clearance_allowed(point_clearance, max) {
-            return false;
-        }
+    if let Some(max) = max_clearance
+        && !clearance_allowed(point_clearance, max)
+    {
+        return false;
     }
     true
 }
@@ -98,35 +183,38 @@ mod tests {
 
     #[test]
     fn clearance_ranks_are_ordered() {
-        assert!(clearance_rank("public").unwrap() < clearance_rank("internal").unwrap());
-        assert!(clearance_rank("internal").unwrap() < clearance_rank("confidential").unwrap());
-        assert!(clearance_rank("confidential").unwrap() < clearance_rank("restricted").unwrap());
-        assert_eq!(clearance_rank("PUBLIC"), Some(0));
-        assert_eq!(clearance_rank("nope"), None);
+        assert!(Clearance::Public < Clearance::Internal);
+        assert!(Clearance::Internal < Clearance::Confidential);
+        assert!(Clearance::Confidential < Clearance::Restricted);
+        assert_eq!("PUBLIC".parse::<Clearance>().unwrap(), Clearance::Public);
+        assert!("nope".parse::<Clearance>().is_err());
     }
 
     #[test]
     fn clearance_allowed_includes_lower_and_equal() {
-        assert!(clearance_allowed(Some("public"), "internal"));
-        assert!(clearance_allowed(Some("internal"), "internal"));
-        assert!(!clearance_allowed(Some("confidential"), "internal"));
-        assert!(!clearance_allowed(Some("restricted"), "public"));
-        // Missing point clearance → public
-        assert!(clearance_allowed(None, "public"));
-        assert!(clearance_allowed(Some(""), "public"));
-        assert!(!clearance_allowed(Some("internal"), "public"));
-        // Unknown max rejects
-        assert!(!clearance_allowed(Some("public"), "top-secret"));
+        assert!(clearance_allowed(Some("public"), Clearance::Internal));
+        assert!(clearance_allowed(Some("internal"), Clearance::Internal));
+        assert!(!clearance_allowed(
+            Some("confidential"),
+            Clearance::Internal
+        ));
+        assert!(!clearance_allowed(Some("restricted"), Clearance::Public));
+        assert!(clearance_allowed(None, Clearance::Public));
+        assert!(clearance_allowed(Some(""), Clearance::Public));
+        assert!(!clearance_allowed(Some("internal"), Clearance::Public));
     }
 
     #[test]
-    fn allowed_clearance_levels_expand() {
-        assert_eq!(allowed_clearance_levels("public"), vec!["public"]);
+    fn allowed_levels_expand() {
+        assert_eq!(Clearance::Public.allowed_levels(), vec![Clearance::Public]);
         assert_eq!(
-            allowed_clearance_levels("confidential"),
-            vec!["public", "internal", "confidential"]
+            Clearance::Confidential.allowed_levels(),
+            vec![
+                Clearance::Public,
+                Clearance::Internal,
+                Clearance::Confidential
+            ]
         );
-        assert!(allowed_clearance_levels("unknown").is_empty());
     }
 
     #[test]
@@ -145,27 +233,70 @@ mod tests {
             Some("alpha"),
             Some("internal"),
             Some("alpha"),
-            Some("confidential")
+            Some(Clearance::Confidential)
         ));
         assert!(!point_in_scope(
             Some("beta"),
             Some("public"),
             Some("alpha"),
-            Some("restricted")
+            Some(Clearance::Restricted)
         ));
         assert!(!point_in_scope(
             Some("alpha"),
             Some("restricted"),
             Some("alpha"),
-            Some("internal")
+            Some(Clearance::Internal)
         ));
-        // No constraints → open
         assert!(point_in_scope(Some("x"), Some("restricted"), None, None));
     }
 
     #[test]
     fn normalize_clearance_works() {
-        assert_eq!(normalize_clearance(" Internal "), Some("internal"));
+        assert_eq!(normalize_clearance(" Internal "), Some(Clearance::Internal));
         assert_eq!(normalize_clearance("weird"), None);
+    }
+
+    #[test]
+    fn parse_optional_clearance_blank_valid_invalid() {
+        assert_eq!(parse_optional_clearance(None).unwrap(), None);
+        assert_eq!(parse_optional_clearance(Some("")).unwrap(), None);
+        assert_eq!(parse_optional_clearance(Some("   ")).unwrap(), None);
+        assert_eq!(
+            parse_optional_clearance(Some("internal")).unwrap(),
+            Some(Clearance::Internal)
+        );
+        assert_eq!(
+            parse_optional_clearance(Some(" CONFIDENTIAL ")).unwrap(),
+            Some(Clearance::Confidential)
+        );
+        assert_eq!(
+            parse_optional_clearance(Some("PUBLIC")).unwrap(),
+            Some(Clearance::Public)
+        );
+        let err = parse_optional_clearance(Some("nope")).unwrap_err();
+        assert!(err.to_string().contains("nope"), "{err}");
+        let err2 = parse_optional_clearance(Some("top-secret")).unwrap_err();
+        assert!(err2.to_string().contains("top-secret"), "{err2}");
+        assert!(
+            err2.to_string().contains("public"),
+            "error should list expected levels: {err2}"
+        );
+    }
+
+    #[test]
+    fn serde_roundtrip() {
+        let json = serde_json::to_string(&Clearance::Confidential).unwrap();
+        assert_eq!(json, "\"confidential\"");
+        let parsed: Clearance = serde_json::from_str("\"RESTRICTED\"").unwrap();
+        assert_eq!(parsed, Clearance::Restricted);
+    }
+
+    #[test]
+    fn all_variants_parse() {
+        for c in Clearance::ALL {
+            let s = c.to_string();
+            let parsed: Clearance = s.parse().unwrap();
+            assert_eq!(*c, parsed);
+        }
     }
 }

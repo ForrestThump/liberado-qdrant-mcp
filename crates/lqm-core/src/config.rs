@@ -6,7 +6,7 @@
 use crate::constants;
 use crate::embedding::{Embedder, FakeEmbedder};
 use crate::error::LqmError;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +52,13 @@ impl std::str::FromStr for EmbedderBackend {
             "openai" => Ok(EmbedderBackend::Openai),
             other => Err(UnknownBackend(other.to_string())),
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for EmbedderBackend {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -115,15 +122,15 @@ fn default_openai_url() -> String {
 #[derive(Debug, Clone, Deserialize)]
 pub struct EmbedderConfig {
     #[serde(default = "default_backend")]
-    pub backend: String,
+    pub backend: EmbedderBackend,
     pub dimension: Option<usize>,
     pub fastembed: Option<FastembedSection>,
     pub ollama: Option<OllamaSection>,
     pub openai: Option<OpenAISection>,
 }
 
-fn default_backend() -> String {
-    constants::DEFAULT_BACKEND.to_string()
+fn default_backend() -> EmbedderBackend {
+    EmbedderBackend::Fastembed
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -140,12 +147,28 @@ impl EmbedderConfig {
         Ok(config_file.embedding)
     }
 
-    pub fn from_env() -> Self {
-        let backend = std::env::var("EMBEDDING_BACKEND")
-            .unwrap_or_else(|_| constants::DEFAULT_BACKEND.to_string());
-        let dimension = std::env::var("EMBEDDING_DIMENSION")
-            .ok()
-            .and_then(|v| v.parse().ok());
+    /// Load embedder settings from process environment.
+    ///
+    /// When `EMBEDDING_BACKEND` is **unset**, uses the default backend.
+    /// When it is **set** to an unrecognized value, returns
+    /// [`LqmError::Validation`] (fail loud — no silent Fastembed fallback).
+    #[allow(clippy::result_large_err)]
+    pub fn from_env() -> Result<Self, LqmError> {
+        Self::from_env_lookup(|key| std::env::var(key).ok())
+    }
+
+    /// Same rules as [`Self::from_env`], but reads values via `get` (for tests).
+    #[allow(clippy::result_large_err)]
+    pub fn from_env_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, LqmError> {
+        let backend = match get(constants::ENV_EMBEDDING_BACKEND) {
+            Some(v) => v
+                .parse::<EmbedderBackend>()
+                .map_err(|e: UnknownBackend| LqmError::Validation(e.to_string()))?,
+            None => constants::DEFAULT_BACKEND
+                .parse()
+                .unwrap_or(EmbedderBackend::Fastembed),
+        };
+        let dimension = get(constants::ENV_EMBEDDING_DIMENSION).and_then(|v| v.parse().ok());
 
         let mut config = Self {
             backend,
@@ -155,34 +178,30 @@ impl EmbedderConfig {
             openai: None,
         };
 
-        if let Ok(model) = std::env::var("EMBEDDING_OLLAMA_MODEL") {
+        if let Some(model) = get(constants::ENV_EMBEDDING_OLLAMA_MODEL) {
             config.ollama = Some(OllamaSection {
-                url: std::env::var("EMBEDDING_OLLAMA_URL")
-                    .unwrap_or_else(|_| "http://localhost:11434".to_string()),
+                url: get(constants::ENV_EMBEDDING_OLLAMA_URL).unwrap_or_else(default_ollama_url),
                 model,
-                dimension: std::env::var("EMBEDDING_OLLAMA_DIMENSION")
-                    .ok()
+                dimension: get(constants::ENV_EMBEDDING_OLLAMA_DIMENSION)
                     .and_then(|v| v.parse().ok()),
             });
         }
 
-        if let Ok(model) = std::env::var("EMBEDDING_OPENAI_MODEL") {
+        if let Some(model) = get(constants::ENV_EMBEDDING_OPENAI_MODEL) {
             config.openai = Some(OpenAISection {
-                url: std::env::var("EMBEDDING_OPENAI_URL")
-                    .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+                url: get(constants::ENV_EMBEDDING_OPENAI_URL).unwrap_or_else(default_openai_url),
                 model,
-                api_key: std::env::var("EMBEDDING_OPENAI_API_KEY").ok(),
-                dimension: std::env::var("EMBEDDING_OPENAI_DIMENSION")
-                    .ok()
+                api_key: get(constants::ENV_EMBEDDING_OPENAI_API_KEY),
+                dimension: get(constants::ENV_EMBEDDING_OPENAI_DIMENSION)
                     .and_then(|v| v.parse().ok()),
             });
         }
 
-        if let Ok(model) = std::env::var("EMBEDDING_FASTEMBED_MODEL") {
+        if let Some(model) = get(constants::ENV_EMBEDDING_FASTEMBED_MODEL) {
             config.fastembed = Some(FastembedSection { model: Some(model) });
         }
 
-        config
+        Ok(config)
     }
 
     #[allow(clippy::result_large_err)]
@@ -193,40 +212,51 @@ impl EmbedderConfig {
                 return Self::load(path);
             }
         }
-        Ok(Self::from_env())
-    }
-}
-
-impl Default for EmbedderConfig {
-    fn default() -> Self {
         Self::from_env()
     }
 }
 
-fn list_available_backends() -> Vec<&'static str> {
+impl Default for EmbedderConfig {
+    /// Pure defaults without reading the environment (avoids panicking if
+    /// `EMBEDDING_BACKEND` is set to a bad value during `Default` construction).
+    /// Prefer [`EmbedderConfig::from_env`] / [`EmbedderConfig::load_or_default`]
+    /// for production config loading.
+    fn default() -> Self {
+        Self {
+            backend: EmbedderBackend::Fastembed,
+            dimension: None,
+            fastembed: None,
+            ollama: None,
+            openai: None,
+        }
+    }
+}
+
+fn list_available_backends() -> Vec<EmbedderBackend> {
     let mut v = vec![];
     #[cfg(feature = "embed-fastembed")]
-    v.push("fastembed");
+    v.push(EmbedderBackend::Fastembed);
     #[cfg(feature = "embed-ollama")]
-    v.push("ollama");
+    v.push(EmbedderBackend::Ollama);
     #[cfg(feature = "embed-openai")]
-    v.push("openai");
+    v.push(EmbedderBackend::Openai);
     if v.is_empty() {
-        v.push("fake");
+        v.push(EmbedderBackend::Fake);
     }
     v
 }
 
+fn format_backend_list(backends: &[EmbedderBackend]) -> String {
+    backends
+        .iter()
+        .map(|b| b.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[allow(clippy::result_large_err)]
 pub fn create_embedder(config: &EmbedderConfig) -> Result<Box<dyn Embedder>, LqmError> {
-    let backend: EmbedderBackend = config.backend.parse().map_err(|e: UnknownBackend| {
-        let available = list_available_backends();
-        LqmError::Validation(format!(
-            "{} Available backends: {}",
-            e,
-            available.join(", ")
-        ))
-    })?;
+    let backend = config.backend;
 
     match backend {
         EmbedderBackend::Fake => {
@@ -326,7 +356,7 @@ pub fn create_embedder(config: &EmbedderConfig) -> Result<Box<dyn Embedder>, Lqm
             let available = list_available_backends();
             Err(LqmError::Validation(format!(
                 "ollama backend not compiled. Rebuild with: cargo build --features embed-ollama. Available backends: {}",
-                available.join(", ")
+                format_backend_list(&available)
             )))
         }
         #[cfg(not(feature = "embed-openai"))]
@@ -334,7 +364,7 @@ pub fn create_embedder(config: &EmbedderConfig) -> Result<Box<dyn Embedder>, Lqm
             let available = list_available_backends();
             Err(LqmError::Validation(format!(
                 "openai backend not compiled. Rebuild with: cargo build --features embed-openai. Available backends: {}",
-                available.join(", ")
+                format_backend_list(&available)
             )))
         }
     }
@@ -352,7 +382,7 @@ backend = "fake"
 dimension = 384
 "#;
         let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.embedding.backend, "fake");
+        assert_eq!(config.embedding.backend, EmbedderBackend::Fake);
         assert_eq!(config.embedding.dimension, Some(384));
     }
 
@@ -368,7 +398,7 @@ url = "http://localhost:11434"
 model = "nomic-embed-text"
 "#;
         let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.embedding.backend, "ollama");
+        assert_eq!(config.embedding.backend, EmbedderBackend::Ollama);
         assert_eq!(config.embedding.dimension, Some(768));
         let ollama = config.embedding.ollama.unwrap();
         assert_eq!(ollama.model, "nomic-embed-text");
@@ -387,7 +417,7 @@ model = "text-embedding-3-small"
 api_key = "sk-test"
 "#;
         let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.embedding.backend, "openai");
+        assert_eq!(config.embedding.backend, EmbedderBackend::Openai);
         let openai = config.embedding.openai.unwrap();
         assert_eq!(openai.model, "text-embedding-3-small");
         assert_eq!(openai.api_key, Some("sk-test".to_string()));
@@ -395,16 +425,61 @@ api_key = "sk-test"
 
     #[test]
     fn test_load_or_default_no_file() {
-        let result = EmbedderConfig::load_or_default(None);
+        // Isolated from process env so CI with EMBEDDING_BACKEND set still passes.
+        let result = EmbedderConfig::from_env_lookup(|_| None);
         assert!(result.is_ok());
         let config = result.unwrap();
-        assert_eq!(config.backend, "fastembed");
+        assert_eq!(config.backend, EmbedderBackend::Fastembed);
+    }
+
+    #[test]
+    fn test_from_env_lookup_unset_defaults() {
+        let config = EmbedderConfig::from_env_lookup(|_| None).expect("unset env");
+        assert_eq!(config.backend, EmbedderBackend::Fastembed);
+    }
+
+    #[test]
+    fn test_from_env_lookup_rejects_unknown_backend() {
+        let result = EmbedderConfig::from_env_lookup(|key| {
+            if key == constants::ENV_EMBEDDING_BACKEND {
+                Some("not-a-real-backend-xyz".into())
+            } else {
+                None
+            }
+        });
+        let err = result.expect_err("unknown backend must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not-a-real-backend-xyz"),
+            "error should mention bad value: {msg}"
+        );
+        assert!(
+            msg.contains("fake") || msg.contains("fastembed") || msg.contains("expected"),
+            "error should hint expected backends: {msg}"
+        );
+        match err {
+            LqmError::Validation(_) => {}
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_from_env_lookup_accepts_known_backend() {
+        let config = EmbedderConfig::from_env_lookup(|key| {
+            if key == constants::ENV_EMBEDDING_BACKEND {
+                Some("fake".into())
+            } else {
+                None
+            }
+        })
+        .expect("fake backend");
+        assert_eq!(config.backend, EmbedderBackend::Fake);
     }
 
     #[test]
     fn test_create_embedder_fake() {
         let config = EmbedderConfig {
-            backend: "fake".to_string(),
+            backend: EmbedderBackend::Fake,
             dimension: Some(128),
             fastembed: None,
             ollama: None,
@@ -419,7 +494,7 @@ api_key = "sk-test"
     #[cfg(feature = "embed-fastembed")]
     fn test_create_embedder_fastembed_defaults_without_section() {
         let config = EmbedderConfig {
-            backend: "fastembed".to_string(),
+            backend: EmbedderBackend::Fastembed,
             dimension: None,
             fastembed: None,
             ollama: None,
@@ -431,26 +506,15 @@ api_key = "sk-test"
     }
 
     #[test]
-    fn test_create_embedder_unknown() {
-        let config = EmbedderConfig {
-            backend: "nonexistent".to_string(),
-            dimension: None,
-            fastembed: None,
-            ollama: None,
-            openai: None,
-        };
-        let result = create_embedder(&config);
+    fn test_deserialize_unknown_backend() {
+        let toml_str = r#"
+[embedding]
+backend = "nonexistent"
+"#;
+        let result = toml::from_str::<ConfigFile>(toml_str);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("nonexistent"), "err was: {err}");
-        assert!(
-            err.contains("Available backends")
-                && (err.contains("fake")
-                    || err.contains("fastembed")
-                    || err.contains("ollama")
-                    || err.contains("openai")),
-            "err was: {err}"
-        );
     }
 
     #[test]
