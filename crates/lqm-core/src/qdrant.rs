@@ -1139,7 +1139,7 @@ impl RagCore {
             .next()
             .ok_or_else(|| LqmError::Other("embedding returned empty".to_string()))?;
 
-        let mut filter = filters.unwrap_or_default();
+        let filter = filters.unwrap_or_default();
         // We want results that match the user's optional filters AND do NOT match the source.
         let qdrant_filter = search_filter_to_qdrant(&filter);
         let exclude_source = Filter {
@@ -2055,6 +2055,7 @@ impl RagCore {
     }
 
     /// Same as `expand_to_chunks` but accepts an optional per-collection `ChunkConfig` override.
+    #[allow(clippy::too_many_arguments)]
     pub fn expand_to_chunks_with_config(
         &self,
         text: &str,
