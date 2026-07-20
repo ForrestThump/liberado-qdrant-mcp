@@ -445,4 +445,245 @@ mod tests {
             "closed + open ATX both split: {chunks:?}"
         );
     }
+
+    // --- is_atx_heading variants (H1, H6, H7+, tab, indent) ---
+
+    #[test]
+    fn atx_heading_h1_and_h6_detected() {
+        assert!(is_atx_heading("# H1"));
+        assert!(is_atx_heading("###### H6"));
+    }
+
+    #[test]
+    fn atx_heading_h7_rejected() {
+        assert!(!is_atx_heading("####### too many"));
+    }
+
+    #[test]
+    fn atx_heading_tab_after_hashes_accepted() {
+        assert!(is_atx_heading("##\tTabbed"));
+    }
+
+    #[test]
+    fn atx_heading_indented_detected() {
+        assert!(is_atx_heading("  ## Indented"));
+    }
+
+    #[test]
+    fn atx_heading_bare_hash_with_space() {
+        assert!(is_atx_heading("# "));
+    }
+
+    // --- is_code_boundary (comments, boundary prefixes, indented) ---
+
+    #[test]
+    fn code_boundary_rejects_comments() {
+        assert!(!is_code_boundary("// C-style comment"));
+        assert!(!is_code_boundary("   // indented comment"));
+        assert!(!is_code_boundary("# Python comment"));
+    }
+
+    #[test]
+    fn code_boundary_allows_shebang_and_attribute() {
+        // #! and #[ should not be treated as comments (they start with # but have special meaning)
+        // #! is a shebang — let it pass through to prefix check
+        assert!(!is_code_boundary("#!/usr/bin/env python3"));
+        // #[ is a Rust attribute — not a comment, but doesn't match any boundary prefix
+        assert!(!is_code_boundary("#[derive(Debug)]"));
+    }
+
+    #[test]
+    fn code_boundary_various_prefixes() {
+        assert!(is_code_boundary("fn "));
+        assert!(is_code_boundary("pub fn bar()"));
+        assert!(is_code_boundary("impl Foo"));
+        assert!(is_code_boundary("struct Bar"));
+        assert!(is_code_boundary("enum Color"));
+        assert!(is_code_boundary("trait Handler"));
+        assert!(is_code_boundary("mod my_module"));
+        assert!(is_code_boundary("class Widget"));
+        assert!(is_code_boundary("def my_func():"));
+        assert!(is_code_boundary("function myFunc()"));
+        assert!(is_code_boundary("export function foo()"));
+        assert!(is_code_boundary("public class JClass"));
+    }
+
+    #[test]
+    fn code_boundary_case_insensitive() {
+        assert!(is_code_boundary("FN uppercase()"));
+        assert!(is_code_boundary("CLASS Pascal()"));
+        assert!(is_code_boundary("Def Python()"));
+    }
+
+    #[test]
+    fn code_boundary_rejects_empty_lines() {
+        assert!(!is_code_boundary(""));
+        assert!(!is_code_boundary("   "));
+    }
+
+    #[test]
+    fn code_boundary_indented_detected() {
+        assert!(is_code_boundary("    fn indented()"));
+        assert!(is_code_boundary("  class Padded"));
+    }
+
+    // --- chunk_kind_for canonical source_type dispatch ---
+
+    #[test]
+    fn chunk_kind_from_canonical_source_type() {
+        assert_eq!(chunk_kind_for(Some("markdown"), None), ChunkKind::Markdown);
+        assert_eq!(
+            chunk_kind_for(Some("code"), Some("notes.txt")),
+            ChunkKind::Code
+        );
+    }
+
+    #[test]
+    fn chunk_kind_from_mixed_case_source_type() {
+        assert_eq!(chunk_kind_for(Some("MARKDOWN"), None), ChunkKind::Markdown);
+        assert_eq!(chunk_kind_for(Some("Code"), None), ChunkKind::Code);
+    }
+
+    #[test]
+    fn chunk_kind_from_uppercase_extension() {
+        assert_eq!(
+            chunk_kind_for(Some("text"), Some("README.MD")),
+            ChunkKind::Markdown
+        );
+        assert_eq!(
+            chunk_kind_for(Some("text"), Some("MAIN.RS")),
+            ChunkKind::Code
+        );
+    }
+
+    // --- chunk_for_ingest Plain dispatch ---
+
+    #[test]
+    fn chunk_for_ingest_plain_dispatches_to_chunk_text() {
+        let strategy = ChunkingStrategy::text(2000, 20);
+        let chunks = chunk_for_ingest("plain text notes", None, None, &strategy);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "plain text notes");
+    }
+
+    #[test]
+    fn chunk_for_ingest_plain_with_text_source() {
+        let strategy = ChunkingStrategy::text(2000, 20);
+        let chunks = chunk_for_ingest("just some notes", Some("text"), Some("file.txt"), &strategy);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "just some notes");
+    }
+
+    // --- chunk_markdown: oversized-section → chunk_text fallback ---
+
+    #[test]
+    fn markdown_oversized_section_falls_back_to_chunk_text() {
+        // chunk_size=20 forces a section with a long paragraph to be split
+        let strategy = ChunkingStrategy::text(20, 5);
+        let md = "# Title\n\nthis is a very long paragraph that exceeds twenty characters";
+        let chunks = chunk_markdown(md, &strategy);
+        assert!(
+            chunks.len() >= 2,
+            "long paragraph under heading should split into multiple chunks, got {chunks:?}"
+        );
+        for c in &chunks {
+            assert!(
+                c.len() <= 20 || !c.contains(' '),
+                "chunk len {} exceeds 20: {c:?}",
+                c.len()
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_empty_input_returns_empty() {
+        let strategy = ChunkingStrategy::text(100, 20);
+        assert!(chunk_markdown("   \n\n", &strategy).is_empty());
+    }
+
+    #[test]
+    fn markdown_lone_heading_without_body() {
+        let strategy = ChunkingStrategy::text(2000, 20);
+        let chunks = chunk_markdown("# Lone heading", &strategy);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "# Lone heading");
+    }
+
+    // --- chunk_code: oversized-block → sliding_window_lines fallback ---
+
+    #[test]
+    fn code_oversized_block_sliding_window_lines() {
+        // chunk_size=30 forces a long function body to be split via line-level sliding window
+        let strategy = ChunkingStrategy::text(30, 10);
+        let code = "fn long_fn() {\n  line_a\n  line_b\n  line_c\n  line_d\n  line_e\n  line_f\n}";
+        let chunks = chunk_code(code, &strategy);
+        assert!(
+            chunks.len() >= 2,
+            "long code block should split into multiple chunks, got {chunks:?}"
+        );
+        // All chunks should contain at least one line and not exceed soft cap unreasonably
+        for c in &chunks {
+            assert!(!c.is_empty(), "chunks should not be empty");
+        }
+    }
+
+    #[test]
+    fn code_empty_input_returns_empty() {
+        let strategy = ChunkingStrategy::text(100, 20);
+        assert!(chunk_code("   \n", &strategy).is_empty());
+    }
+
+    #[test]
+    fn code_no_boundary_falls_back_to_chunk_text() {
+        let strategy = ChunkingStrategy::text(2000, 20);
+        // No code boundary prefix in this text → single block → chunk_text
+        let code = "x = 1\ny = 2";
+        let chunks = chunk_code(code, &strategy);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "x = 1\ny = 2");
+    }
+
+    // --- sliding_window_words edge cases ---
+
+    #[test]
+    fn sliding_window_words_oversized_single_word() {
+        let strategy = ChunkingStrategy::text(3, 1);
+        // A word that exceeds chunk_size entirely
+        let chunks = chunk_text("supercalifragilisticexpialidocious", &strategy);
+        assert!(!chunks.is_empty(), "oversized word should produce a chunk");
+        assert_eq!(chunks[0], "supercalifragilisticexpialidocious");
+    }
+
+    #[test]
+    fn sliding_window_words_small_advance_when_overlap_consumes_most() {
+        let strategy = ChunkingStrategy::text(15, 12);
+        // overlap/5 = 2, with small windows the advance falls to 1
+        let text = "a b c d e f g h i j";
+        let chunks = chunk_text(text, &strategy);
+        assert!(
+            chunks.len() >= 3,
+            "small advance should produce many chunks, got {:?}",
+            chunks
+        );
+    }
+
+    // --- sliding_window_lines edge cases ---
+
+    #[test]
+    fn sliding_window_lines_oversized_single_line() {
+        let strategy = ChunkingStrategy::text(3, 1);
+        // Split on code boundary to trigger sliding_window_lines with a long block
+        let code = "fn f() {\n  very_long_line_that_exceeds_chunk_size\n}";
+        let chunks = chunk_code(code, &strategy);
+        assert!(!chunks.is_empty(), "oversized line should not crash");
+    }
+
+    #[test]
+    fn sliding_window_lines_empty_input_returns_empty() {
+        let strategy = ChunkingStrategy::text(100, 20);
+        // chunk_code on empty/whitespace-only text exercises sliding_window_lines
+        // indirectly via the blocks.is_empty() fallback
+        let chunks = chunk_code("\n", &strategy);
+        assert!(chunks.is_empty());
+    }
 }
