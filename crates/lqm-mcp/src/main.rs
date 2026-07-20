@@ -455,6 +455,22 @@ impl LqmServer {
         }
     }
 
+    /// Aggregate point counts grouped by source_type and total distinct sources.
+    /// Helps agents understand what is in a collection before searching.
+    #[tool]
+    async fn get_collection_stats(&self, name: String) -> McpResult<Value> {
+        match self.core().collection_stats(&name).await {
+            Ok(stats) => Ok(serde_json::json!({
+                "status": "ok",
+                "name": name,
+                "total_points": stats.total_points,
+                "total_sources": stats.total_sources,
+                "source_types": stats.source_types,
+            })),
+            Err(e) => Err(McpError::internal(format!("collection_stats failed: {e}"))),
+        }
+    }
+
     /// Inspect a collection: point counts, vector size, distance metric, status,
     /// plus the recorded embedder identity and dimension.
     #[tool]
@@ -2290,6 +2306,7 @@ const EXPECTED_OFFLINE_TOOLS: &[&str] = &[
     "create_collection",
     "delete_collection",
     "get_collection_info",
+    "get_collection_stats",
     "ingest_path",
     "ingest_url",
     "ingest_many",

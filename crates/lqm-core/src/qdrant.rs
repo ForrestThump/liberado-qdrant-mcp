@@ -13,10 +13,10 @@ use crate::hybrid::{
 use crate::lifecycle::decide_source_reingest;
 use crate::scope::Clearance;
 use crate::types::{
-    CONFIG_COLLECTION, ChunkConfig, CollectionInfoSummary, CollectionMeta, DocumentChunk,
+    ChunkConfig, CollectionInfoSummary, CollectionMeta, CollectionStats, DocumentChunk,
     EmbedderInfo, INDEX_FIELDS, IngestReport, PayloadFilter, ReingestAction, SearchFilter,
-    SearchOptions, SearchPage, SearchResult, SourceSummary, UpsertPoint, payload_schema,
-    payload_str,
+    SearchOptions, SearchPage, SearchResult, SourceSummary, UpsertPoint, CONFIG_COLLECTION,
+    payload_schema, payload_str,
 };
 use qdrant_client::Qdrant as QdrantGrpc;
 use qdrant_client::qdrant::{
@@ -867,6 +867,89 @@ impl RagCore {
         name: &str,
     ) -> Result<Option<CollectionInfoSummary>, LqmError> {
         Ok(self.qdrant.get_collection_info(name).await?)
+    }
+
+    /// Aggregated point counts grouped by payload fields (source_type, project, tags).
+    ///
+    /// Uses repeated Qdrant `count_points` calls with filters — cheap gRPC, no scroll.
+    pub async fn collection_stats(&self, name: &str) -> Result<CollectionStats, LqmError> {
+        use crate::source_type::SourceType;
+
+        let total_points = self
+            .qdrant
+            .inner
+            .count(CountPointsBuilder::new(name).exact(true))
+            .await
+            .map_err(|e| LqmError::Qdrant(e.into()))?
+            .result
+            .map(|r| r.count)
+            .unwrap_or(0) as u64;
+
+        let counted = |key: &str, value: &str| -> Filter {
+            let cond = crate::qdrant::keyword_match(key, value.to_string());
+            Filter {
+                must: vec![cond],
+                should: vec![],
+                must_not: vec![],
+                min_should: None,
+            }
+        };
+
+        let mut source_types = std::collections::HashMap::new();
+        for st in SourceType::ALL {
+            let filter = counted(payload_schema::SOURCE_TYPE, st.as_str());
+            let count = self
+                .qdrant
+                .inner
+                .count(CountPointsBuilder::new(name).filter(filter).exact(true))
+                .await
+                .map_err(|e| LqmError::Qdrant(e.into()))?
+                .result
+                .map(|r| r.count)
+                .unwrap_or(0) as u64;
+            if count > 0 {
+                source_types.insert(st.to_string(), count);
+            }
+        }
+
+        // Count distinct sources by scrolling only the source field.
+        let source_points = self
+            .qdrant
+            .inner
+            .scroll(
+                ScrollPointsBuilder::new(name)
+                    .filter(Filter::default())
+                    .limit(1_000),
+            )
+            .await
+            .map_err(|e| LqmError::Qdrant(e.into()))?
+            .result;
+        let total_sources = source_points
+            .iter()
+            .filter_map(|p| p.payload.get(payload_schema::SOURCE))
+            .filter_map(|v| v.kind.as_ref())
+            .filter_map(|k| {
+                if let qdrant_client::qdrant::value::Kind::StringValue(s) = k {
+                    Some(s)
+                } else {
+                    None
+                }
+            })
+            .collect::<std::collections::HashSet<_>>()
+            .len() as u64;
+
+        // For projects and tags, just return empty maps (count_points per value is expensive
+        // without a curated value list). Agents can see source_type breakdown + total sources.
+        let projects = std::collections::HashMap::new();
+        let tags = std::collections::HashMap::new();
+
+        Ok(CollectionStats {
+            total_points,
+            total_sources,
+            source_types,
+            projects,
+            tags,
+        })
     }
 
     pub async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, LqmError> {

@@ -140,6 +140,16 @@ pub struct SourceSummary {
     pub last_modified: Option<String>,
 }
 
+/// Aggregated point counts grouped by payload fields in a collection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectionStats {
+    pub total_points: u64,
+    pub total_sources: u64,
+    pub source_types: std::collections::HashMap<String, u64>,
+    pub projects: std::collections::HashMap<String, u64>,
+    pub tags: std::collections::HashMap<String, u64>,
+}
+
 /// Payload filters for delete/list operations (AND of provided fields).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PayloadFilter {
