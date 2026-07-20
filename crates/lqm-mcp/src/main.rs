@@ -1134,7 +1134,7 @@ async fn test_all_mcp_tools_live_smoke() {
 
     // 1) create_collection
     let created = server
-        .create_collection(coll.clone(), None)
+        .create_collection(coll.clone(), None, None)
         .await
         .expect("create_collection");
     assert_eq!(created["status"], "ok", "create_collection: {created}");
@@ -1550,7 +1550,7 @@ async fn test_p5_hybrid_live_smoke() {
     let coll = "lqm_smoke_hybrid_p5";
     let _ = server.delete_collection(coll.to_string()).await;
     server
-        .create_collection(coll.to_string(), None)
+        .create_collection(coll.to_string(), None, None)
         .await
         .expect("create_collection");
 
@@ -1634,7 +1634,7 @@ async fn test_scope_filter_live_smoke() {
     let coll = "lqm_smoke_scope_filter";
     let _ = server.delete_collection(coll.to_string()).await;
     server
-        .create_collection(coll.to_string(), None)
+        .create_collection(coll.to_string(), None, None)
         .await
         .expect("create_collection");
 
@@ -1751,7 +1751,7 @@ async fn test_source_reconstruction_live_smoke() {
     let src = "recon://multi-doc";
     let _ = server.delete_collection(coll.to_string()).await;
     server
-        .create_collection(coll.to_string(), None)
+        .create_collection(coll.to_string(), None, None)
         .await
         .expect("create_collection");
 
@@ -1911,7 +1911,7 @@ async fn test_p0_lifecycle_live_smoke() {
     let coll = "lqm_smoke_p0_lifecycle";
     let _ = server.delete_collection(coll.to_string()).await;
     server
-        .create_collection(coll.to_string(), None)
+        .create_collection(coll.to_string(), None, None)
         .await
         .expect("create");
 
@@ -2030,7 +2030,7 @@ async fn test_collection_create_info_delete_tools() {
     let _ = server.core().delete_collection(coll).await;
 
     let created = server
-        .create_collection(coll.to_string(), None)
+        .create_collection(coll.to_string(), None, None)
         .await
         .expect("create_collection");
     assert_eq!(created["status"], "ok");
