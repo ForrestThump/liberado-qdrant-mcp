@@ -13,9 +13,9 @@ use crate::hybrid::{
 use crate::lifecycle::decide_source_reingest;
 use crate::scope::Clearance;
 use crate::types::{
-    ChunkConfig, CollectionInfoSummary, CollectionMeta, CollectionStats, DocumentChunk,
-    EmbedderInfo, INDEX_FIELDS, IngestReport, PayloadFilter, ReingestAction, SearchFilter,
-    SearchOptions, SearchPage, SearchResult, SourceSummary, UpsertPoint, CONFIG_COLLECTION,
+    CONFIG_COLLECTION, ChunkConfig, CollectionInfoSummary, CollectionMeta, CollectionStats,
+    DocumentChunk, EmbedderInfo, INDEX_FIELDS, IngestReport, PayloadFilter, ReingestAction,
+    SearchFilter, SearchOptions, SearchPage, SearchResult, SourceSummary, UpsertPoint,
     payload_schema, payload_str,
 };
 use qdrant_client::Qdrant as QdrantGrpc;
@@ -1035,20 +1035,23 @@ impl RagCore {
 
             let texts: Vec<String> = group_chunks.iter().map(|c| c.text.clone()).collect();
             // Batch embedding to cap memory pressure on large ingests.
-            let embeddings: Vec<Vec<f32>> = if texts.len() > crate::constants::MAX_EMBED_BATCH_CHUNKS {
-                log::info!(
-                    "large batch ({} chunks), splitting into {} sub-batches",
-                    texts.len(),
-                    texts.len().div_ceil(crate::constants::MAX_EMBED_BATCH_CHUNKS)
-                );
-                let mut all = Vec::with_capacity(texts.len());
-                for sub_batch in texts.chunks(crate::constants::MAX_EMBED_BATCH_CHUNKS) {
-                    all.extend(self.embed_batch(sub_batch.to_vec()).await?);
-                }
-                all
-            } else {
-                self.embed_batch(texts).await?
-            };
+            let embeddings: Vec<Vec<f32>> =
+                if texts.len() > crate::constants::MAX_EMBED_BATCH_CHUNKS {
+                    log::info!(
+                        "large batch ({} chunks), splitting into {} sub-batches",
+                        texts.len(),
+                        texts
+                            .len()
+                            .div_ceil(crate::constants::MAX_EMBED_BATCH_CHUNKS)
+                    );
+                    let mut all = Vec::with_capacity(texts.len());
+                    for sub_batch in texts.chunks(crate::constants::MAX_EMBED_BATCH_CHUNKS) {
+                        all.extend(self.embed_batch(sub_batch.to_vec()).await?);
+                    }
+                    all
+                } else {
+                    self.embed_batch(texts).await?
+                };
             let mut points = Vec::with_capacity(group_chunks.len());
             let group_len = group_chunks.len();
             let embedding_model = self
@@ -1648,9 +1651,7 @@ impl RagCore {
         // Write per-collection metadata (idempotent — overwrite so dim is always current).
         if name != CONFIG_COLLECTION {
             self.write_collection_meta(
-                name,
-                dim as u64,
-                None, // model_label set by callers
+                name, dim as u64, None, // model_label set by callers
                 None, // chunk_size (global default)
                 None, // chunk_overlap
                 None, // chunk_kind
@@ -2039,8 +2040,17 @@ impl RagCore {
         clearance: Option<Clearance>,
     ) -> Vec<DocumentChunk> {
         self.expand_to_chunks_with_config(
-            text, source, source_type, collection, tags, project, last_modified,
-            path_hint, scope, clearance, None,
+            text,
+            source,
+            source_type,
+            collection,
+            tags,
+            project,
+            last_modified,
+            path_hint,
+            scope,
+            clearance,
+            None,
         )
     }
 
@@ -2736,7 +2746,16 @@ mod tests {
         };
         let text = "this is a very long sentence that should be split into multiple chunks";
         let chunks = core.expand_to_chunks_with_config(
-            text, None, Some("text".to_string()), "c".into(), None, None, None, None, None, None,
+            text,
+            None,
+            Some("text".to_string()),
+            "c".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
             Some(small_config),
         );
         assert!(
@@ -2754,7 +2773,16 @@ mod tests {
         let core = make_fake_core(1);
         let text = "a short sentence";
         let chunks = core.expand_to_chunks(
-            text, Some("short".to_string()), Some("text".to_string()), "c".into(), None, None, None, None, None, None,
+            text,
+            Some("short".to_string()),
+            Some("text".to_string()),
+            "c".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].source.as_deref(), Some("short"));

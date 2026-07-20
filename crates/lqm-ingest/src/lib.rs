@@ -152,9 +152,8 @@ impl Extractor for CsvExtractor {
 
         let mut out = String::new();
         for result in reader.records() {
-            let record = result.map_err(|e| {
-                ExtractError::ExtractionFailed(format!("csv read failed: {e}"))
-            })?;
+            let record = result
+                .map_err(|e| ExtractError::ExtractionFailed(format!("csv read failed: {e}")))?;
             // Join all fields for this row with tab separator for readability.
             let row: Vec<&str> = record.iter().collect();
             out.push_str(&row.join("\t"));

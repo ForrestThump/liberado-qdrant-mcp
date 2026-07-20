@@ -132,7 +132,8 @@ pub fn looks_like_markdown(content: &str) -> bool {
         }
         if (t.starts_with("# ") || t.starts_with("## "))
             || (t.starts_with("### ") || t.starts_with("#### "))
-            || t.starts_with("##### ") || t.starts_with("###### ")
+            || t.starts_with("##### ")
+            || t.starts_with("###### ")
         {
             return true;
         }
@@ -455,7 +456,10 @@ mod tests {
             chunk_kind_for(Some("text"), Some("notes.txt"), None),
             ChunkKind::Plain
         );
-        assert_eq!(chunk_kind_for(Some("webpage"), None, None), ChunkKind::Plain);
+        assert_eq!(
+            chunk_kind_for(Some("webpage"), None, None),
+            ChunkKind::Plain
+        );
     }
 
     #[test]
@@ -577,7 +581,10 @@ mod tests {
 
     #[test]
     fn chunk_kind_from_canonical_source_type() {
-        assert_eq!(chunk_kind_for(Some("markdown"), None, None), ChunkKind::Markdown);
+        assert_eq!(
+            chunk_kind_for(Some("markdown"), None, None),
+            ChunkKind::Markdown
+        );
         assert_eq!(
             chunk_kind_for(Some("code"), Some("notes.txt"), None),
             ChunkKind::Code
@@ -586,7 +593,10 @@ mod tests {
 
     #[test]
     fn chunk_kind_from_mixed_case_source_type() {
-        assert_eq!(chunk_kind_for(Some("MARKDOWN"), None, None), ChunkKind::Markdown);
+        assert_eq!(
+            chunk_kind_for(Some("MARKDOWN"), None, None),
+            ChunkKind::Markdown
+        );
         assert_eq!(chunk_kind_for(Some("Code"), None, None), ChunkKind::Code);
     }
 
@@ -745,7 +755,9 @@ mod tests {
 
     #[test]
     fn looks_like_markdown_rejects_plain() {
-        assert!(!looks_like_markdown("Hello world.\n\nJust some paragraphs."));
+        assert!(!looks_like_markdown(
+            "Hello world.\n\nJust some paragraphs."
+        ));
     }
 
     #[test]

@@ -491,9 +491,9 @@ impl LqmServer {
                 "collection": coll,
                 "hits": hits,
             })),
-            Err(e) => {
-                Err(McpError::internal(format!("get_similar_to_source failed: {e}")))
-            }
+            Err(e) => Err(McpError::internal(format!(
+                "get_similar_to_source failed: {e}"
+            ))),
         }
     }
 
