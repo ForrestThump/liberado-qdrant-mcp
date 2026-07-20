@@ -52,7 +52,7 @@ Pick only if a concrete need appears:
 |------|--------|
 | Full offline Qdrant double for ingest/search | MVP uses `McpTestClient` + FakeEmbedder + lazy client; full mock needs a seam |
 | HTTP router tests (`tower::ServiceExt`) | Companion to offline MCP harness |
-| Collection ↔ embedder hard guarantees | Refuse search on dim/model mismatch; optional model label at create |
+
 | Richer `list_sources` previews | Sample title / first-chunk preview / total chars |
 | Background re-index workers | Only if bulk refresh becomes painful |
 | Dioxus SPA | Demo UX; agents should prefer MCP/HTTP |
