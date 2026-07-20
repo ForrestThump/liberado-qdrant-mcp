@@ -119,6 +119,12 @@ pub struct CollectionMeta {
     pub vector_dim: u64,
     pub model_label: Option<String>,
     pub created_at: String,
+    /// Per-collection chunk size override (None → global default).
+    pub chunk_size: Option<u64>,
+    /// Per-collection chunk overlap override (None → global default).
+    pub chunk_overlap: Option<u64>,
+    /// Per-collection chunk kind override (None → infer from source_type/extension).
+    pub chunk_kind: Option<String>,
 }
 
 /// Reserved Qdrant collection that stores `CollectionMeta` points for every
@@ -132,6 +138,16 @@ pub struct SourceSummary {
     pub count: u64,
     pub source_type: Option<String>,
     pub last_modified: Option<String>,
+}
+
+/// Aggregated point counts grouped by payload fields in a collection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectionStats {
+    pub total_points: u64,
+    pub total_sources: u64,
+    pub source_types: std::collections::HashMap<String, u64>,
+    pub projects: std::collections::HashMap<String, u64>,
+    pub tags: std::collections::HashMap<String, u64>,
 }
 
 /// Payload filters for delete/list operations (AND of provided fields).

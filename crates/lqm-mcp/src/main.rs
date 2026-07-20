@@ -394,25 +394,49 @@ impl LqmServer {
         name: String,
         vector_dim: Option<u64>,
         model_label: Option<String>,
+        chunk_size: Option<u64>,
+        chunk_overlap: Option<u64>,
+        chunk_kind: Option<String>,
     ) -> McpResult<Value> {
         let dim = vector_dim.map(|d| d as usize);
         match self.core().create_collection(&name, dim).await {
             Ok(created) => {
                 let resolved_dim = dim.unwrap_or_else(|| self.core().embedder.dimension());
-                // Write label if provided (overwrites the ensure-time blank write).
-                if let Some(ref label) = model_label {
+                // Write label + chunk config if provided (overwrites the ensure-time blank write).
+                let has_override = model_label.is_some()
+                    || chunk_size.is_some()
+                    || chunk_overlap.is_some()
+                    || chunk_kind.is_some();
+                if has_override {
                     let _ = self
                         .core()
-                        .write_collection_meta(&name, resolved_dim as u64, Some(label.clone()))
+                        .write_collection_meta(
+                            &name,
+                            resolved_dim as u64,
+                            model_label.clone(),
+                            chunk_size,
+                            chunk_overlap,
+                            chunk_kind.clone(),
+                        )
                         .await;
                 }
-                Ok(serde_json::json!({
+                let mut resp = serde_json::json!({
                     "status": "ok",
                     "name": name,
                     "created": created,
                     "vector_dim": resolved_dim,
                     "embedder_id": self.core().embedder.id(),
-                }))
+                });
+                if chunk_size.is_some() {
+                    resp["chunk_size"] = chunk_size.into();
+                }
+                if chunk_overlap.is_some() {
+                    resp["chunk_overlap"] = chunk_overlap.into();
+                }
+                if let Some(ref ck) = chunk_kind {
+                    resp["chunk_kind"] = serde_json::Value::String(ck.clone());
+                }
+                Ok(resp)
             }
             Err(e) => Err(McpError::internal(format!("create_collection failed: {e}"))),
         }
@@ -428,6 +452,48 @@ impl LqmServer {
                 "deleted": deleted,
             })),
             Err(e) => Err(McpError::internal(format!("delete_collection failed: {e}"))),
+        }
+    }
+
+    /// Aggregate point counts grouped by source_type and total distinct sources.
+    /// Helps agents understand what is in a collection before searching.
+    #[tool]
+    async fn get_collection_stats(&self, name: String) -> McpResult<Value> {
+        match self.core().collection_stats(&name).await {
+            Ok(stats) => Ok(serde_json::json!({
+                "status": "ok",
+                "name": name,
+                "total_points": stats.total_points,
+                "total_sources": stats.total_sources,
+                "source_types": stats.source_types,
+            })),
+            Err(e) => Err(McpError::internal(format!("collection_stats failed: {e}"))),
+        }
+    }
+
+    /// Find sources similar to a given source by embedding its full text.
+    /// Excludes the source itself from results.
+    #[tool]
+    async fn get_similar_to_source(
+        &self,
+        source: String,
+        collection: Option<String>,
+        limit: Option<u64>,
+    ) -> McpResult<Value> {
+        let coll = collection
+            .as_deref()
+            .unwrap_or(lqm_core::types::DEFAULT_COLLECTION_NAME);
+        let l = limit.unwrap_or(10);
+        match self.core().similar_to_source(&source, coll, l, None).await {
+            Ok(hits) => Ok(serde_json::json!({
+                "status": "ok",
+                "source": source,
+                "collection": coll,
+                "hits": hits,
+            })),
+            Err(e) => Err(McpError::internal(format!(
+                "get_similar_to_source failed: {e}"
+            ))),
         }
     }
 
@@ -454,6 +520,15 @@ impl LqmServer {
                     result["recorded_vector_dim"] = serde_json::Value::Number(m.vector_dim.into());
                     if let Some(label) = m.model_label {
                         result["model_label"] = serde_json::Value::String(label);
+                    }
+                    if let Some(cs) = m.chunk_size {
+                        result["chunk_size"] = serde_json::Value::Number(cs.into());
+                    }
+                    if let Some(co) = m.chunk_overlap {
+                        result["chunk_overlap"] = serde_json::Value::Number(co.into());
+                    }
+                    if let Some(ref ck) = m.chunk_kind {
+                        result["chunk_kind"] = serde_json::Value::String(ck.clone());
                     }
                 }
                 // Always include the current embedder info so agents can compare.
@@ -1134,7 +1209,7 @@ async fn test_all_mcp_tools_live_smoke() {
 
     // 1) create_collection
     let created = server
-        .create_collection(coll.clone(), None, None)
+        .create_collection(coll.clone(), None, None, None, None, None)
         .await
         .expect("create_collection");
     assert_eq!(created["status"], "ok", "create_collection: {created}");
@@ -1550,7 +1625,7 @@ async fn test_p5_hybrid_live_smoke() {
     let coll = "lqm_smoke_hybrid_p5";
     let _ = server.delete_collection(coll.to_string()).await;
     server
-        .create_collection(coll.to_string(), None, None)
+        .create_collection(coll.to_string(), None, None, None, None, None)
         .await
         .expect("create_collection");
 
@@ -1634,7 +1709,7 @@ async fn test_scope_filter_live_smoke() {
     let coll = "lqm_smoke_scope_filter";
     let _ = server.delete_collection(coll.to_string()).await;
     server
-        .create_collection(coll.to_string(), None, None)
+        .create_collection(coll.to_string(), None, None, None, None, None)
         .await
         .expect("create_collection");
 
@@ -1751,7 +1826,7 @@ async fn test_source_reconstruction_live_smoke() {
     let src = "recon://multi-doc";
     let _ = server.delete_collection(coll.to_string()).await;
     server
-        .create_collection(coll.to_string(), None, None)
+        .create_collection(coll.to_string(), None, None, None, None, None)
         .await
         .expect("create_collection");
 
@@ -1911,7 +1986,7 @@ async fn test_p0_lifecycle_live_smoke() {
     let coll = "lqm_smoke_p0_lifecycle";
     let _ = server.delete_collection(coll.to_string()).await;
     server
-        .create_collection(coll.to_string(), None, None)
+        .create_collection(coll.to_string(), None, None, None, None, None)
         .await
         .expect("create");
 
@@ -2030,7 +2105,7 @@ async fn test_collection_create_info_delete_tools() {
     let _ = server.core().delete_collection(coll).await;
 
     let created = server
-        .create_collection(coll.to_string(), None, None)
+        .create_collection(coll.to_string(), None, None, None, None, None)
         .await
         .expect("create_collection");
     assert_eq!(created["status"], "ok");
@@ -2257,6 +2332,8 @@ const EXPECTED_OFFLINE_TOOLS: &[&str] = &[
     "create_collection",
     "delete_collection",
     "get_collection_info",
+    "get_collection_stats",
+    "get_similar_to_source",
     "ingest_path",
     "ingest_url",
     "ingest_many",

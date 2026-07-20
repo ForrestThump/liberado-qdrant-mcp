@@ -130,12 +130,47 @@ impl Extractor for PdfExtractor {
     }
 }
 
+#[cfg(feature = "csv")]
+pub struct CsvExtractor;
+
+#[cfg(feature = "csv")]
+impl Extractor for CsvExtractor {
+    fn supported_extensions(&self) -> &[&str] {
+        &["csv"]
+    }
+
+    fn source_type(&self) -> &str {
+        constants::SOURCE_TYPE_TEXT
+    }
+
+    fn extract_text(&self, path: &Path) -> Result<String, ExtractError> {
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .flexible(true)
+            .from_path(path)
+            .map_err(|e| ExtractError::ExtractionFailed(format!("csv open failed: {e}")))?;
+
+        let mut out = String::new();
+        for result in reader.records() {
+            let record = result
+                .map_err(|e| ExtractError::ExtractionFailed(format!("csv read failed: {e}")))?;
+            // Join all fields for this row with tab separator for readability.
+            let row: Vec<&str> = record.iter().collect();
+            out.push_str(&row.join("\t"));
+            out.push('\n');
+        }
+        Ok(out)
+    }
+}
+
 pub fn all_extractors() -> Vec<Box<dyn Extractor>> {
     #[allow(unused_mut)]
     let mut extractors: Vec<Box<dyn Extractor>> =
         vec![Box::new(TextExtractor), Box::new(AudioExtractor)];
     #[cfg(feature = "pdf")]
     extractors.push(Box::new(PdfExtractor));
+    #[cfg(feature = "csv")]
+    extractors.push(Box::new(CsvExtractor));
     extractors
 }
 
@@ -551,5 +586,20 @@ trailer<< /Root 1 0 R >>\n\
                 eprintln!("extract_file_async live soft-fail: {e}");
             }
         }
+    }
+
+    #[cfg(feature = "csv")]
+    #[test]
+    fn csv_extractor_reads_rows() {
+        use crate::{CsvExtractor, Extractor};
+        let dir = std::env::temp_dir();
+        let p = dir.join("lqm_csv_test.csv");
+        std::fs::write(&p, "a,b,c\n1,2,3\nx,y,z\n").expect("write csv");
+        let extractor = CsvExtractor;
+        let text = extractor.extract_text(&p).expect("extract");
+        assert!(text.contains("a\tb\tc"));
+        assert!(text.contains("1\t2\t3"));
+        assert!(text.contains("x\ty\tz"));
+        let _ = std::fs::remove_file(&p);
     }
 }

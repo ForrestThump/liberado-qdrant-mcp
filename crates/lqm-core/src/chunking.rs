@@ -81,8 +81,16 @@ pub enum ChunkKind {
     Code,
 }
 
-/// Infer chunk kind from extractor `source_type` and optional path/extension hint.
-pub fn chunk_kind_for(source_type: Option<&str>, path_hint: Option<&str>) -> ChunkKind {
+/// Infer chunk kind from extractor `source_type`, path extension, and optional content preview.
+///
+/// When extension and source_type are both ambiguous (e.g. `.txt`, `.log`, empty), the
+/// optional `content_hint` (first ~256 bytes of raw text) is inspected for structural
+/// markdown or code patterns.
+pub fn chunk_kind_for(
+    source_type: Option<&str>,
+    path_hint: Option<&str>,
+    content_hint: Option<&str>,
+) -> ChunkKind {
     let ext = path_hint
         .and_then(|p| {
             std::path::Path::new(p)
@@ -102,7 +110,46 @@ pub fn chunk_kind_for(source_type: Option<&str>, path_hint: Option<&str>) -> Chu
         return ChunkKind::Code;
     }
 
+    if let Some(content) = content_hint {
+        if looks_like_markdown(content) {
+            return ChunkKind::Markdown;
+        }
+        if looks_like_code(content) {
+            return ChunkKind::Code;
+        }
+    }
+
     ChunkKind::Plain
+}
+
+/// Quick heuristic: does the first chunk of text look like structured markdown?
+pub fn looks_like_markdown(content: &str) -> bool {
+    let preview = &content[..content.len().min(constants::HTML_LOOKAHEAD_CHARS)];
+    for line in preview.lines().take(10) {
+        let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            return true;
+        }
+        if (t.starts_with("# ") || t.starts_with("## "))
+            || (t.starts_with("### ") || t.starts_with("#### "))
+            || t.starts_with("##### ")
+            || t.starts_with("###### ")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Quick heuristic: does the first chunk of text look like code?
+pub fn looks_like_code(content: &str) -> bool {
+    let preview = &content[..content.len().min(constants::HTML_LOOKAHEAD_CHARS)];
+    for line in preview.lines().take(10).filter(|l| !l.trim().is_empty()) {
+        if is_code_boundary(line) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Dispatch to the appropriate chunker.
@@ -112,7 +159,7 @@ pub fn chunk_for_ingest(
     path_hint: Option<&str>,
     strategy: &ChunkingStrategy,
 ) -> Vec<String> {
-    match chunk_kind_for(source_type, path_hint) {
+    match chunk_kind_for(source_type, path_hint, Some(text)) {
         ChunkKind::Markdown => chunk_markdown(text, strategy),
         ChunkKind::Code => chunk_code(text, strategy),
         ChunkKind::Plain => chunk_text(text, strategy),
@@ -398,18 +445,21 @@ mod tests {
     #[test]
     fn chunk_kind_from_extension() {
         assert_eq!(
-            chunk_kind_for(Some("text"), Some("readme.md")),
+            chunk_kind_for(Some("text"), Some("readme.md"), None),
             ChunkKind::Markdown
         );
         assert_eq!(
-            chunk_kind_for(Some("text"), Some("main.rs")),
+            chunk_kind_for(Some("text"), Some("main.rs"), None),
             ChunkKind::Code
         );
         assert_eq!(
-            chunk_kind_for(Some("text"), Some("notes.txt")),
+            chunk_kind_for(Some("text"), Some("notes.txt"), None),
             ChunkKind::Plain
         );
-        assert_eq!(chunk_kind_for(Some("webpage"), None), ChunkKind::Plain);
+        assert_eq!(
+            chunk_kind_for(Some("webpage"), None, None),
+            ChunkKind::Plain
+        );
     }
 
     #[test]
@@ -531,27 +581,33 @@ mod tests {
 
     #[test]
     fn chunk_kind_from_canonical_source_type() {
-        assert_eq!(chunk_kind_for(Some("markdown"), None), ChunkKind::Markdown);
         assert_eq!(
-            chunk_kind_for(Some("code"), Some("notes.txt")),
+            chunk_kind_for(Some("markdown"), None, None),
+            ChunkKind::Markdown
+        );
+        assert_eq!(
+            chunk_kind_for(Some("code"), Some("notes.txt"), None),
             ChunkKind::Code
         );
     }
 
     #[test]
     fn chunk_kind_from_mixed_case_source_type() {
-        assert_eq!(chunk_kind_for(Some("MARKDOWN"), None), ChunkKind::Markdown);
-        assert_eq!(chunk_kind_for(Some("Code"), None), ChunkKind::Code);
+        assert_eq!(
+            chunk_kind_for(Some("MARKDOWN"), None, None),
+            ChunkKind::Markdown
+        );
+        assert_eq!(chunk_kind_for(Some("Code"), None, None), ChunkKind::Code);
     }
 
     #[test]
     fn chunk_kind_from_uppercase_extension() {
         assert_eq!(
-            chunk_kind_for(Some("text"), Some("README.MD")),
+            chunk_kind_for(Some("text"), Some("README.MD"), None),
             ChunkKind::Markdown
         );
         assert_eq!(
-            chunk_kind_for(Some("text"), Some("MAIN.RS")),
+            chunk_kind_for(Some("text"), Some("MAIN.RS"), None),
             ChunkKind::Code
         );
     }
@@ -685,5 +741,50 @@ mod tests {
         // indirectly via the blocks.is_empty() fallback
         let chunks = chunk_code("\n", &strategy);
         assert!(chunks.is_empty());
+    }
+
+    // --- content-type detection ---
+
+    #[test]
+    fn looks_like_markdown_detects_headings_and_fences() {
+        assert!(looks_like_markdown("# Title\n\nbody"));
+        assert!(looks_like_markdown("## H2\n\npara\n\n###### H6"));
+        assert!(looks_like_markdown("```rust\ncode\n```"));
+        assert!(looks_like_markdown("~~~\nblock\n~~~"));
+    }
+
+    #[test]
+    fn looks_like_markdown_rejects_plain() {
+        assert!(!looks_like_markdown(
+            "Hello world.\n\nJust some paragraphs."
+        ));
+    }
+
+    #[test]
+    fn looks_like_code_detects_patterns() {
+        assert!(looks_like_code("fn main() {}\n"));
+        assert!(looks_like_code("def hello():\n    pass"));
+        assert!(looks_like_code("import os\n\ndef main():\n    pass"));
+    }
+
+    #[test]
+    fn looks_like_code_rejects_plain() {
+        assert!(!looks_like_code("Hello world.\n\nMore text here."));
+    }
+
+    #[test]
+    fn chunk_kind_for_content_hint_on_ambiguous_ext() {
+        assert_eq!(
+            chunk_kind_for(Some("text"), Some("notes.txt"), Some("# Heading\n\nbody")),
+            ChunkKind::Markdown
+        );
+        assert_eq!(
+            chunk_kind_for(Some("text"), Some("notes.txt"), Some("fn main() {}")),
+            ChunkKind::Code
+        );
+        assert_eq!(
+            chunk_kind_for(Some("text"), Some("notes.txt"), Some("just notes")),
+            ChunkKind::Plain
+        );
     }
 }
