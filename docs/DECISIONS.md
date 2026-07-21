@@ -361,3 +361,31 @@ default backend behavior is unchanged.
 auth replaces payload clearance ceilings.
 
 ---
+
+## 020 — Per-collection embedder guarantees via `_lqm_config` metadata collection
+
+**Date:** 2026-07-20
+
+**What:** A reserved Qdrant collection `_lqm_config` stores per-collection
+metadata (`CollectionMeta`). Every `ensure_collection` call writes the active
+embedder's id + dimension. `search_page` and `embed_and_upsert_batch` validate
+that the current embedder dim matches the collection before performing expensive
+operations. `create_collection` and `get_collection_info` surfaces expose this
+info to agents.
+
+**Why:**
+- Qdrant has no native collection-level metadata or schema annotations.
+- A `_lqm_config` collection with 1-dim dummy vectors is minimal overhead (one
+  point per user collection, ~300 bytes).
+- Deterministic UUIDs (SHA-256 of collection name) make the upsert idempotent.
+- Backward-compatible: collections created before this feature have no config
+  entry; `validate_collection_dim` passes for unknown collections.
+
+**Implications:**
+- `_lqm_config` is auto-created on first write (same pattern as `memories`).
+- The config collection stores embedder identity, not chunk/policy config
+  (those follow as separate fields on the same point in roadmap item #2).
+- Clear error messages replace cryptic Qdrant dimension rejection gRPC errors.
+
+**Revisit if:** Qdrant adds native collection metadata, or a dedicated KV store
+supplants the reserved collection pattern.

@@ -20,8 +20,8 @@ Headless RAG for LLM agents: **Qdrant + embeddings + MCP/HTTP**. No chat UI.
 | Read all chunks of one source in order | `get_source` / `list_chunks` | Re-running `search` and guessing filters |
 | Expand a hit with neighboring chunks | `expand_context` (same `source` + `chunk_index` ±N) | Inventing text outside the index |
 | Remove one document | `delete_by_source` | `delete_collection` (wipes everything) |
-| Create a scoped KB | `create_collection` | — |
-| Check embedder dim/model | `get_embedder_info` | Guessing dims from docs alone |
+| Create a scoped KB | `create_collection` (optional `model_label` to tag with embedder name) | — |
+| Check embedder dim/model | `get_embedder_info` / `get_collection_info` (recorded + current dim) | Guessing dims from docs alone |
 | Save a long-term preference/fact | `store_memory` | Putting prefs into a random doc collection without `source_type=memory` |
 | Retrieve past prefs/facts by meaning | `recall_memories` (optional `use_recency`) | Full-collection `search` without memory filter |
 
@@ -43,6 +43,15 @@ See `docs/ARCHITECTURE.md` scaling section.
 
 **Scoped filtering:** optional payload keys `scope` (exact partition) and `clearance` (`public` | `internal` | `confidential` | `restricted`). Search/context accept `scope` and `max_clearance` (admits that level and all lower). Unscoped search is the default. Delete-by-filter accepts the same constraints. Not multi-user auth — agents pass the scope they are allowed to see.
 
+**Collection ↔ embedder guarantees:** every `create_collection` records the
+active embedder's id + dimension in the reserved `_lqm_config` collection.
+`search` and all ingest tools validate the current embedder dim matches the
+target collection before performing expensive operations, returning a clear
+error instead of a cryptic Qdrant gRPC rejection. Collections created before
+this feature (no config entry) pass validation for backward compatibility.
+Use `get_collection_info` to inspect the recorded and current embedder dims
+side by side.
+
 ## MCP tool matrix ↔ HTTP
 
 | MCP tool | HTTP |
@@ -54,8 +63,8 @@ See `docs/ARCHITECTURE.md` scaling section.
 | `search` | `POST /api/search` |
 | `get_relevant_context` | `POST /api/context` |
 | `list_collections` | `GET /api/collections` |
-| `create_collection` | `POST /api/collections` |
-| `get_collection_info` | `GET /api/collections/{name}` |
+| `create_collection` | `POST /api/collections` `{ "name", "vector_dim"?, "model_label"? }` |
+| `get_collection_info` | `GET /api/collections/{name}` (also returns `embedder_id`, `recorded_vector_dim`, `current_embedder_id`) |
 | `delete_collection` | `DELETE /api/collections/{name}` |
 | `list_sources` | `GET /api/collections/{name}/sources` |
 | `list_chunks` | `GET /api/collections/{name}/sources/{source}/chunks?offset=&limit=` |
