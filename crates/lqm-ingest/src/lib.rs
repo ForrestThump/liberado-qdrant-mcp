@@ -125,8 +125,34 @@ impl Extractor for PdfExtractor {
 
     fn extract_text(&self, path: &Path) -> Result<String, ExtractError> {
         let bytes = std::fs::read(path)?;
-        pdf_extract::extract_text_from_mem(&bytes)
-            .map_err(|e| ExtractError::ExtractionFailed(format!("pdf extraction failed: {e}")))
+        match spectre_pdf::extract_text(&bytes) {
+            Ok(text) => {
+                let trimmed = text.trim().to_string();
+                if trimmed.is_empty() {
+                    return Err(ExtractError::ExtractionFailed(
+                        "pdf produced empty text — may be image-only".into(),
+                    ));
+                }
+                let score = spectre_pdf::score_text(&trimmed);
+                log::info!(
+                    "pdf extracted {} chars from '{}' (quality score: {:.2})",
+                    trimmed.len(),
+                    path.display(),
+                    score
+                );
+                if score < 0.3 {
+                    log::warn!(
+                        "low-quality pdf extraction (score={:.2}) from '{}' — may be scanned",
+                        score,
+                        path.display()
+                    );
+                }
+                Ok(trimmed)
+            }
+            Err(e) => Err(ExtractError::ExtractionFailed(format!(
+                "pdf extraction failed: {e}"
+            ))),
+        }
     }
 }
 
@@ -457,11 +483,69 @@ trailer<< /Root 1 0 R >>\n\
         std::fs::write(&path, minimal).expect("write pdf fixture");
         let extractor = PdfExtractor;
         let result = extractor.extract_text(&path);
+        // spectre_pdf is strict about valid xref tables; minimal fixtures without
+        // correct byte offsets may fail to parse. The test passes as long as the
+        // pipeline doesn't produce an unexpected error (panic / unrelated error type).
         match result {
-            Ok(_text) => {}
+            Ok(text) => {
+                assert!(!text.trim().is_empty(), "extracted text must not be empty");
+                assert!(text.contains("Hello"), "expected text, got: '{text}'");
+            }
             Err(ExtractError::ExtractionFailed(_)) => {}
-            Err(e) => panic!("unexpected error from PDF fixture path: {e}"),
+            Err(e) => panic!("unexpected error from PDF fixture: {e}"),
         }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn integration_pdf_roundtrips_through_spectre() {
+        use printpdf::font::BuiltinFont;
+        use printpdf::text::TextItem;
+        use printpdf::*;
+
+        // Generate a valid PDF with known text using printpdf
+        let page_contents = vec![
+            Op::StartTextSection,
+            Op::SetFont {
+                font: printpdf::PdfFontHandle::Builtin(BuiltinFont::Helvetica),
+                size: Pt(12.0),
+            },
+            Op::SetTextCursor {
+                pos: Point {
+                    x: Pt(28.0),
+                    y: Pt(790.0),
+                },
+            },
+            Op::ShowText {
+                items: vec![TextItem::Text("Integration Test Paragraph".to_string())],
+            },
+            Op::EndTextSection,
+        ];
+
+        let mut doc = PdfDocument::new("integration-test");
+        let page = PdfPage::new(Mm(210.0), Mm(297.0), page_contents);
+        let mut warnings = vec![];
+        let pdf_bytes = doc
+            .with_pages(vec![page])
+            .save(&PdfSaveOptions::default(), &mut warnings);
+
+        // Write to temp file
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("lqm_integration_{}.pdf", uuid::Uuid::new_v4()));
+        std::fs::write(&path, pdf_bytes).expect("write generated pdf");
+
+        // Extract using our PdfExtractor (spectre_pdf backend)
+        let extractor = PdfExtractor;
+        let text = extractor
+            .extract_text(&path)
+            .expect("extraction of generated PDF must succeed");
+
+        assert!(
+            text.contains("Integration Test Paragraph"),
+            "generated PDF text should contain the source string, got: '{text}'"
+        );
+
         std::fs::remove_file(&path).ok();
     }
 
