@@ -497,6 +497,58 @@ trailer<< /Root 1 0 R >>\n\
         std::fs::remove_file(&path).ok();
     }
 
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn integration_pdf_roundtrips_through_spectre() {
+        use printpdf::font::BuiltinFont;
+        use printpdf::text::TextItem;
+        use printpdf::*;
+
+        // Generate a valid PDF with known text using printpdf
+        let page_contents = vec![
+            Op::StartTextSection,
+            Op::SetFont {
+                font: printpdf::PdfFontHandle::Builtin(BuiltinFont::Helvetica),
+                size: Pt(12.0),
+            },
+            Op::SetTextCursor {
+                pos: Point {
+                    x: Pt(28.0),
+                    y: Pt(790.0),
+                },
+            },
+            Op::ShowText {
+                items: vec![TextItem::Text("Integration Test Paragraph".to_string())],
+            },
+            Op::EndTextSection,
+        ];
+
+        let mut doc = PdfDocument::new("integration-test");
+        let page = PdfPage::new(Mm(210.0), Mm(297.0), page_contents);
+        let mut warnings = vec![];
+        let pdf_bytes = doc
+            .with_pages(vec![page])
+            .save(&PdfSaveOptions::default(), &mut warnings);
+
+        // Write to temp file
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("lqm_integration_{}.pdf", uuid::Uuid::new_v4()));
+        std::fs::write(&path, pdf_bytes).expect("write generated pdf");
+
+        // Extract using our PdfExtractor (spectre_pdf backend)
+        let extractor = PdfExtractor;
+        let text = extractor
+            .extract_text(&path)
+            .expect("extraction of generated PDF must succeed");
+
+        assert!(
+            text.contains("Integration Test Paragraph"),
+            "generated PDF text should contain the source string, got: '{text}'"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn test_unknown_extension_error() {
         let path = make_tmp_file("xyz", "data");
