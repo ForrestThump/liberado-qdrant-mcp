@@ -1225,4 +1225,88 @@ mod tests {
         assert_eq!(payload[lqm_core::payload_schema::TOTAL_CHUNKS], total);
         assert_eq!(payload[lqm_core::payload_schema::EMBEDDING_MODEL], "fake");
     }
+
+    // ── Offline router tests (tower::ServiceExt) ──
+
+    use axum::body::Body;
+    use lqm_core::FakeEmbedder;
+    use lqm_core::QdrantClient;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn make_test_state() -> AppState {
+        let qdrant = QdrantClient::new_lazy("http://127.0.0.1:9").expect("lazy client");
+        let embedder = Box::new(FakeEmbedder::new(48));
+        let core = Arc::new(RagCore::new(qdrant, embedder, Some(1)));
+        AppState {
+            core,
+            embed_dimension: 48,
+            api_token: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn router_health_returns_ok() {
+        let state = make_test_state();
+        let router = build_router(state);
+        let req = axum::http::Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn router_embedder_info_returns_dimension() {
+        let state = make_test_state();
+        let router = build_router(state);
+        let req = axum::http::Request::builder()
+            .uri("/api/embedder")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["dimension"], 48);
+        assert_eq!(v["id"], "fake");
+    }
+
+    #[ignore = "requires live Qdrant for list_collections"]
+    #[tokio::test]
+    async fn router_list_collections_returns_array() {
+        let state = make_test_state();
+        let router = build_router(state);
+        let req = axum::http::Request::builder()
+            .uri("/api/collections")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "ok");
+        assert!(v["collections"].is_array());
+    }
+
+    #[ignore = "requires live Qdrant for get_collection_info"]
+    #[tokio::test]
+    async fn router_collection_info_not_found() {
+        let state = make_test_state();
+        let router = build_router(state);
+        let req = axum::http::Request::builder()
+            .uri("/api/collections/nonexistent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["exists"], false);
+        assert_eq!(v["name"], "nonexistent");
+    }
 }
